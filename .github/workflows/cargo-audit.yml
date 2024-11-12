@@ -1,0 +1,41 @@
+name: cargo-audit 
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - Cargo.toml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - Cargo.toml
+  schedule:
+    - cron: "45 0 * * SUN"
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        id: rust-toolchain
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-${{steps.rust-toolchain.outputs.cachekey}}
+
+      - name: Install cargo-audit
+        run: |
+          cargo install cargo-audit
+
+      - name: cargo audit
+        run: cargo audit
