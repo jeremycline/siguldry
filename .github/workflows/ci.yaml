@@ -10,8 +10,58 @@ on:
     - cron: "30 0 * * SUN"
 
 jobs:
+  audit:
+    name: Cargo dependency checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        id: rust-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-deny
+        run: |
+          cargo install --locked cargo-deny
+
+      - name: Check for security advisories
+        run: cargo deny --log-level info --workspace check --show-stats advisories
+
+      - name: Check for unexpected licenses from dependencies
+        run: cargo deny --log-level info --workspace check --show-stats licenses
+
+      - name: Check crates are from expected sources
+        run: cargo deny --log-level info --workspace check --show-stats sources
+
+  zizmor:
+    name: GitHub Actions lints
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        id: rust-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install zizmor
+        run: |
+          cargo install zizmor
+
+      - name: zizmor - GitHub actions audit
+        run: zizmor .
+
   test:
-    name: Test
+    name: Unit tests
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -31,20 +81,15 @@ jobs:
         with:
           toolchain: ${{matrix.rust-toolchain}}
           components: clippy, rustfmt
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{steps.rust-toolchain.outputs.cachekey}}
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: cargo fmt
         run: cargo fmt --all --check
+
       - name: cargo build
         run: cargo build
+
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features -- --deny warnings
 
@@ -57,5 +102,52 @@ jobs:
           sudo mkdir -p /run/pesign/
           sudo chmod -R 777 /run/pesign/
 
-      - name: cargo test
-        run: cargo test --all-features --workspace --no-fail-fast
+      - name: Run unit tests
+        run: cargo test --all-features --workspace --no-fail-fast --bins --examples --benches
+
+  integration-tests:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    container: quay.io/jeremycline/sigul-pesign-bridge-ci:latest
+    services:
+      sigul-bridge:
+        image: quay.io/jeremycline/sigul-pesign-bridge-ci:latest
+        env:
+          RUN_SIGUL_BRIDGE: true
+        ports:
+          # Server connects to this port
+          - 44333:44333
+          # Client connects to this port
+          - 44334:44334
+      sigul-server:
+        image: quay.io/jeremycline/sigul-pesign-bridge-ci:latest
+        env:
+          RUN_SIGUL_SERVER: true
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up test environment
+        run: |
+          set -xeuo pipefail
+
+          mkdir -p ~/.sigul
+          cp devel/sigul-client.conf ~/.sigul/client.conf
+          cp -r /var/lib/sigul ~/.sigul/sigul
+          bash ./devel/sigul_key_setup.sh
+
+          # More hackiness; copy the test PE and signing certificates to the location
+          # it would be at if we had built it rather than baking it into the image.
+          # GitHub Actions does not use the container's WORKDIR.
+          cp -r /srv/siguldry/* .
+
+          mkdir -p /run/pesign/
+
+          # We aren't running under systemd here, so make up a fake CREDENTIALS_DIRECTORY
+          mkdir -p /srv/siguldry/mock_credentials/
+          echo "my-signing-password" > /srv/siguldry/mock_credentials/sigul-signing-key-passphrase 
+
+      - name: Integration tests
+        run: RUNTIME_DIRECTORY=/run/pesign CREDENTIALS_DIRECTORY=/srv/siguldry/mock_credentials/ cargo test --all-features --workspace -- --nocapture

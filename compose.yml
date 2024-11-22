@@ -1,0 +1,12 @@
+services:
+  sigul-bridge:
+    image: quay.io/jeremycline/sigul-pesign-bridge-ci:latest
+    environment:
+      RUN_SIGUL_BRIDGE: true
+    ports:
+      - 44334:44334
+      - 44333:44333
+  sigul-server:
+    image: quay.io/jeremycline/sigul-pesign-bridge-ci:latest
+    environment:
+      RUN_SIGUL_SERVER: true

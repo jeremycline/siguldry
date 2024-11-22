@@ -9,7 +9,8 @@
 // read/write to `/run/pesign/socket`.
 
 use std::{
-    io::{Read, Write},
+    io::Write,
+    path::PathBuf,
     process::{Command, Output, Stdio},
     sync::{Mutex, Once},
     time::Duration,
@@ -21,7 +22,7 @@ use nix::sys::{
     signal::{self, Signal},
     stat::Mode,
 };
-use tempfile::NamedTempFile;
+use tempfile::{tempdir, NamedTempFile};
 
 static UMASK: Once = Once::new();
 
@@ -43,10 +44,11 @@ fn run_command(mut client_command: Command) -> Result<(Output, Output)> {
             "{socket_path} exists; unable to start test instance"
         ));
     };
+    let working_dir = tempdir()?;
     let mut server_command = Command::cargo_bin("sigul-pesign-bridge")?;
     server_command
-        .env("SIGUL_PESIGN_LOG", "trace")
-        .arg(format!("--socket={socket_path}"))
+        .env("RUNTIME_DIRECTORY", working_dir.path())
+        .env("SIGUL_PESIGN_BRIDGE_LOG", "trace")
         .arg("listen")
         .stderr(Stdio::piped())
         .stdout(Stdio::piped());
@@ -57,17 +59,29 @@ fn run_command(mut client_command: Command) -> Result<(Output, Output)> {
         std::thread::sleep(Duration::from_millis(5));
         tries += 1;
         if tries > 100 {
-            return Err(anyhow!("Faild to start service: {error:?}"));
+            return Err(anyhow!("Failed to start service: {error:?}"));
         }
     }
 
     let client_output = client_command.output()?;
+    println!(
+        "client_stdout: {}",
+        String::from_utf8_lossy(&client_output.stdout)
+    );
+    println!(
+        "client_stderr: {}",
+        String::from_utf8_lossy(&client_output.stderr)
+    );
 
     signal::kill(
         nix::unistd::Pid::from_raw(service.id().try_into()?),
         Signal::SIGTERM,
     )?;
     let service_output = service.wait_with_output()?;
+    println!(
+        "service_stderr: {}",
+        String::from_utf8_lossy(&service_output.stderr)
+    );
 
     Ok((client_output, service_output))
 }
@@ -93,28 +107,56 @@ fn is_unlocked() -> Result<()> {
 
 #[test]
 fn sign_attached() -> Result<()> {
-    let mut in_file = NamedTempFile::new()?;
-    let mut out_file = NamedTempFile::new()?;
-    in_file.write_all(b"Pineapple on pizza is good")?;
-    in_file.flush()?;
+    let output_dir = tempfile::tempdir()?;
+    let out_file = output_dir.path().join("sample-uefi.signed.efi");
+    let mut in_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    in_file.push("../target/x86_64-unknown-uefi/debug/sample-uefi.efi");
 
     let mut client_command = Command::new("pesign-client");
     client_command
         .arg("--sign")
-        .arg("--token=Test Cert DB")
-        .arg("--certificate=Test Certificate")
-        .arg(format!("--infile={}", in_file.path().display()))
-        .arg(format!("--outfile={}", out_file.path().display()));
+        .arg("--token=signing-key")
+        .arg("--certificate=codesigning")
+        .arg(format!("--infile={}", in_file.as_path().display()))
+        .arg(format!("--outfile={}", &out_file.as_path().display()));
     let (client_output, service_output) = run_command(client_command)?;
 
-    let client_stderr = String::from_utf8_lossy(&client_output.stderr);
-    println!("{}", client_stderr);
     assert!(client_output.status.success());
     assert!(service_output.status.success());
 
-    let mut buf = String::new();
-    out_file.read_to_string(&mut buf)?;
-    assert_eq!(buf, "Pineapple on pizza is good\nSigned, Jeremy\n");
+    let input_signature_list = Command::new("sbverify")
+        .arg("--list")
+        .arg(in_file.as_path())
+        .output()?;
+    println!("{}", String::from_utf8_lossy(&input_signature_list.stderr));
+    println!(
+        "stdout: {}",
+        String::from_utf8_lossy(&input_signature_list.stdout)
+    );
+    let output_signature_list = Command::new("sbverify")
+        .arg("--list")
+        .arg(&out_file)
+        .output()?;
+    println!("{}", String::from_utf8_lossy(&output_signature_list.stderr));
+    println!(
+        "stdout: {}",
+        String::from_utf8_lossy(&output_signature_list.stdout)
+    );
+
+    let mut signing_cert = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    signing_cert.push("../keys/signing-cert.pem");
+    let output_signed = Command::new("sbverify")
+        .arg("--cert")
+        .arg(&signing_cert)
+        .arg(&out_file)
+        .output()?;
+    assert!(output_signed.status.success());
+    let input_signed = Command::new("sbverify")
+        .arg("--cert")
+        .arg(signing_cert)
+        .arg(in_file)
+        .output()?;
+    assert!(!input_signed.status.success());
 
     Ok(())
 }

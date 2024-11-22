@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) Microsoft Corporation.
 
-use std::path::PathBuf;
-
 use clap::Parser;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio_util::sync::CancellationToken;
-use tracing::instrument;
 use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, EnvFilter};
 
 mod cli;
+mod config;
 mod service;
 
 #[tokio::main(flavor = "current_thread")]
@@ -19,7 +17,7 @@ async fn main() -> Result<(), anyhow::Error> {
         .with_writer(std::io::stderr);
     let registry = tracing_subscriber::registry()
         .with(stderr_layer)
-        .with(EnvFilter::from_env("SIGUL_PESIGN_LOG"));
+        .with(EnvFilter::from_env("SIGUL_PESIGN_BRIDGE_LOG"));
     tracing::subscriber::set_global_default(registry)
         .expect("Programming error: set_global_default should only be called once.");
 
@@ -28,14 +26,14 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let opts = cli::Cli::parse();
     match opts.command {
-        cli::Command::Listen => service::listen(opts.socket, halt_token)?.await?,
-        cli::Command::Status => status(opts.socket).await,
+        cli::Command::Listen => {
+            service::listen(opts.config.unwrap_or_default(), halt_token)?.await?
+        }
+        cli::Command::Config => {
+            println!("{}", opts.config.unwrap_or_default());
+            Ok(())
+        }
     }
-}
-
-#[instrument(ret)]
-async fn status(path: PathBuf) -> Result<(), anyhow::Error> {
-    Ok(())
 }
 
 /// Install and manage signal handlers for the process.
