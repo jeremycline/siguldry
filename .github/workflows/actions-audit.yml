@@ -4,12 +4,11 @@ on:
     branches:
       - main
     paths:
-      - .github/workflows/
+      - .github/workflows/**
   pull_request:
-    branches:
-      - main
+    branches: ["**"]
     paths:
-      - .github/workflows/
+      - .github/workflows/**
   schedule:
     - cron: "15 0 * * SUN"
 
@@ -43,21 +42,4 @@ jobs:
           cargo install zizmor
 
       - name: zizmor - GitHub actions audit
-        run: zizmor --format sarif . > results.sarif
-        env:
-          GH_TOKEN: $${{ secrets.GITHUB_TOKEN }}
-
-      - name: Report zizmor results to GitHub
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: results.sarif
-          category: zizmor
-
-      - name: Check zizmor results
-        run: |
-          problems=$(zizmor -q --format json . | jq 'length')
-          if (( $problems > 0 )); then
-            echo "Found problem(s) with zizmor:"
-            zizmor --format plain .
-            exit 1
-          fi
+        run: zizmor .
