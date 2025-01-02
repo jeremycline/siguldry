@@ -503,7 +503,6 @@ async fn sign_attached_with_filetype(
                     return Err(anyhow!("Unexpected number of file descriptors sent"));
                 }
 
-                // TODO: Maybe tokio files?
                 let file = fds
                     .first()
                     .map(|fd| {
