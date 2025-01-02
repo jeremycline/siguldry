@@ -311,16 +311,6 @@ async fn request_handler(config: Config, mut unix_stream: UnixStream) -> Result<
                         )
                         .await
                     }
-                    Command::SignAttached => {
-                        // TODO: Once we parse the filetype and stuff out of the request we need to
-                        // split this up from the _with_filetype
-                        sign_attached_with_filetype(
-                            &config,
-                            &mut unix_stream,
-                            request.payload_length,
-                        )
-                        .await
-                    }
                     _unsupported => {
                         // A well-behaved client should never do this: it queries for the command version
                         // and we respond indicating we don't know it.
@@ -374,12 +364,7 @@ async fn get_command_version(
     buf.put_u32_ne(4_u32);
 
     match Command::try_from(command) {
-        Ok(
-            Command::GetCmdVersion
-            | Command::IsTokenUnlocked
-            | Command::SignAttachedWithFileType
-            | Command::SignAttached,
-        ) => {
+        Ok(Command::GetCmdVersion | Command::SignAttachedWithFileType) => {
             tracing::debug!(
                 "Client queried for the server version of command {:?}",
                 command
