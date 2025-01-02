@@ -300,9 +300,6 @@ async fn request_handler(config: Config, mut unix_stream: UnixStream) -> Result<
                 tracing::debug!(?request, "Client request received");
 
                 match request.command {
-                    Command::IsTokenUnlocked => {
-                        is_token_unlocked(&mut unix_stream, request.payload_length).await
-                    }
                     Command::GetCmdVersion => {
                         get_command_version(&mut unix_stream, request.payload_length).await
                     }
@@ -412,51 +409,6 @@ async fn get_command_version(
             return Err(anyhow!("get-cmd-version request was malformed"));
         }
     }
-}
-
-#[instrument(skip_all, ret, fields(token = tracing::field::Empty))]
-async fn is_token_unlocked(
-    connection: &mut UnixStream,
-    payload_length: usize,
-) -> Result<(), anyhow::Error> {
-    // The expected payload is a u32 which is the length of the C-style string
-    // which follows it.
-    if std::mem::size_of::<u32>() > payload_length {
-        return Err(anyhow!(
-            "Client payload for is-token-unlocked is too small!"
-        ));
-    }
-    let mut payload = vec![0_u8; payload_length];
-    connection.read_exact(&mut payload).await?;
-
-    let (token_name_len, token_name) = payload.split_at(std::mem::size_of::<u32>());
-    let token_name_len: usize = token_name_len
-        .try_into()
-        .map(u32::from_ne_bytes)?
-        .try_into()?;
-    if token_name.len() != token_name_len {
-        tracing::error!(
-            name_length = token_name_len,
-            payload_size = token_name.len(),
-            "Token name length doesn't match the payload size"
-        );
-        return Err(anyhow!(
-            "Client sent malformed request for is-token-unlocked"
-        ));
-    }
-
-    let token_name = CStr::from_bytes_until_nul(token_name)?.to_str()?;
-    tracing::Span::current().record("token", token_name);
-
-    // Lie and always say the token is unlocked for now
-    let mut buf = bytes::BytesMut::new();
-    buf.put_u32_ne(PESIGND_VERSION);
-    buf.put_u32_ne(CMD_RESPONSE);
-    buf.put_u32_ne(4_u32);
-    buf.put_i32_ne(0_i32);
-    connection.write_all_buf(&mut buf).await?;
-
-    Ok(())
 }
 
 /// Handle signing requests from the pesign-client.

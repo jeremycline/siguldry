@@ -86,25 +86,6 @@ fn run_command(mut client_command: Command) -> Result<(Output, Output)> {
     Ok((client_output, service_output))
 }
 
-// Test that the daemon implements the "is-unlocked" command.
-#[test]
-fn is_unlocked() -> Result<()> {
-    let mut client_command = Command::new("pesign-client");
-    client_command
-        .arg("--is-unlocked")
-        .arg("--token=Test Cert DB");
-    let (client_output, service_output) = run_command(client_command)?;
-
-    assert!(client_output.status.success());
-    assert_eq!(
-        "token \"Test Cert DB\" is unlocked\n",
-        String::from_utf8_lossy(&client_output.stdout)
-    );
-    assert!(service_output.status.success());
-
-    Ok(())
-}
-
 #[test]
 fn sign_attached() -> Result<()> {
     let output_dir = tempfile::tempdir()?;
