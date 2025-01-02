@@ -30,19 +30,28 @@ pub struct Config {
     /// files.
     pub socket_path: PathBuf,
 
-    /// The path to a file containing the passphrase to access the local NSS database for client
-    /// authentication.
+    /// The systemd credentials ID of the Sigul client configuration.
     ///
-    /// This service is designed to run under systemd and expects sensitive credentials to be provided
-    /// using systemd's "LoadCredentialsEncrypted" option. Thus, this must be a path relative to
-    /// $CREDENTIALS_PATH which systemd will set automatically. To prepare an encrypted credential:
+    /// This configuration file includes the password to access the NSS database that contains the
+    /// client certificate used to authenticate with the Sigul server. As such, it is expected to
+    /// be provided by systemd's "LoadCredentialsEncrypted" option.
     ///
-    /// $ systemd-ask-password -n | systemd-creds encrypt - /etc/sigul-pesign-bridge/nss-database-passphrase
+    /// To prepare the encrypted configuration::
     ///
-    /// This will prompt you for the passphrase and, encrypt it, and write it to the file in /etc/.
-    /// The default systemd unit file is configured to use this file out of the box. Refer to
-    /// systemd-creds(1) for details.
-    pub nss_database_passphrase_path: PathBuf,
+    ///   # systemd-creds encrypt /secure/ramfs/sigul-client.conf /etc/sigul-pesign-bridge/sigul-client.conf
+    ///
+    /// This will produce an encrypted blob which will be decrypted by systemd at runtime.
+    ///  
+    /// # Example
+    ///
+    /// Suppose the systemd unit file contains the following::
+    ///  
+    ///     [Service]
+    ///     LoadCredentialsEncrypted=sigul-client-config:/etc/sigul-pesign-bridge/sigul-client.conf
+    ///
+    /// The credentials ID is "sigul-client-config". The decrypted file is provided to the service
+    /// by systemd using the path "$CREDENTIALS_PATH/sigul-client-config".
+    pub sigul_client_config: PathBuf,
 
     /// The total length of time (in seconds) to wait for a signing request to complete.
     ///
@@ -87,15 +96,29 @@ impl Default for Key {
 }
 
 impl Key {
+    /// The Sigul passphrase protecting this key.
     pub fn passphrase(&self) -> Result<String, anyhow::Error> {
         let mut credentials_path = std::env::var("CREDENTIALS_DIRECTORY")
             .map(PathBuf::from)
-            .context("You (or systemd) must set CREDENTIALS_DIRECTORY")?;
+            .context("You (or systemd) must set the CREDENTIALS_DIRECTORY environment variable")?;
         credentials_path.push(&self.passphrase_path);
         let mut passphrase = std::fs::read_to_string(credentials_path)?;
         // TODO: decide on how to handle a passphrase file with newlines (split and take the first line, reject?)
         passphrase.push('\0');
         Ok(passphrase)
+    }
+}
+
+impl Config {
+    /// Get the absolute path to the Sigul client configuration file.
+    ///
+    /// The configuration file is expected to be stored relative to the CREDENTIALS_DIRECTORY.
+    pub fn sigul_client_config(&self) -> Result<PathBuf, anyhow::Error> {
+        let mut config_path = std::env::var("CREDENTIALS_DIRECTORY")
+            .map(PathBuf::from)
+            .context("You (or systemd) must set the CREDENTIALS_DIRECTORY environment variable")?;
+        config_path.push(&self.sigul_client_config);
+        Ok(config_path)
     }
 }
 
@@ -114,9 +137,9 @@ impl Default for Config {
         Self {
             work_directory: PathBuf::from("/run/pesign/"),
             socket_path: PathBuf::from("/run/pesign/socket"),
-            nss_database_passphrase_path: PathBuf::from("nss-database-passphrase"),
             request_timeout_secs: NonZeroU64::new(60 * 15).expect("Don't set the default to 0"),
             keys: vec![Key::default()],
+            sigul_client_config: PathBuf::from("sigul-client-config"),
         }
     }
 }

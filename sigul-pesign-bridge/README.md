@@ -28,5 +28,6 @@ podman compose up -d
 # the sigul_key_setup.sh script and must match.
 mkdir creds/
 echo "my-signing-password" > creds/sigul-signing-key-passphrase
+cp devel/local/client.conf creds/sigul-client-config
 CREDENTIALS_DIRECTORY=$(pwd)/creds/ cargo test
 ```

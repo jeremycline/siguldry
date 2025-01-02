@@ -632,7 +632,10 @@ async fn sign_attached_with_filetype(
 
     // TODO Might want to come up with a more elegant retry since this relies on the request timeout
     // and then we never respond to the client.
-    while let Err(error) = forward_pe_file(key, &sigul_input, &sigul_output).await {
+    let sigul_client_config = config.sigul_client_config()?;
+    while let Err(error) =
+        forward_pe_file(&sigul_client_config, key, &sigul_input, &sigul_output).await
+    {
         tracing::warn!(%error, "signing failed; retrying sigul client in 2 seconds");
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
@@ -664,7 +667,12 @@ async fn sign_attached_with_filetype(
 }
 
 #[instrument(skip_all, ret)]
-async fn forward_pe_file(key: &Key, input: &Path, output: &Path) -> anyhow::Result<()> {
+async fn forward_pe_file(
+    sigul_client_config: &Path,
+    key: &Key,
+    input: &Path,
+    output: &Path,
+) -> anyhow::Result<()> {
     let passphrase = key.passphrase()?;
 
     let mut command = tokio::process::Command::new("sigul");
@@ -673,7 +681,7 @@ async fn forward_pe_file(key: &Key, input: &Path, output: &Path) -> anyhow::Resu
             "-v",
             "-v",
             "--batch",
-            "--user-name=sigul-client",
+            format!("--config-file={}", sigul_client_config.display()).as_str(),
             "sign-pe",
             "--output",
             output.to_str().unwrap(),

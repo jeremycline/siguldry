@@ -147,7 +147,8 @@ jobs:
 
           # We aren't running under systemd here, so make up a fake CREDENTIALS_DIRECTORY
           mkdir -p /srv/siguldry/mock_credentials/
-          echo "my-signing-password" > /srv/siguldry/mock_credentials/sigul-signing-key-passphrase 
+          echo "my-signing-password" > /srv/siguldry/mock_credentials/sigul-signing-key-passphrase
+          cp ./devel/github/client.conf /srv/siguldry/mock_credentials/sigul-client-config
 
       - name: Integration tests
         run: RUNTIME_DIRECTORY=/run/pesign CREDENTIALS_DIRECTORY=/srv/siguldry/mock_credentials/ cargo test --all-features --workspace -- --nocapture
