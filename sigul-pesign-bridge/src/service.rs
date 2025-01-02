@@ -443,7 +443,6 @@ async fn sign_attached_with_filetype(
     let cmsgs = tokio::task::spawn_blocking(move || {
         let _enter = span.enter();
         let mut cmsgs = vec![];
-        let mut iovs = vec![];
 
         // First one is fdin, second is fdout
         let mut tries = 0;
@@ -484,10 +483,12 @@ async fn sign_attached_with_filetype(
             );
             cmsgs.append(&mut cmsg);
 
-            // TODO: Drop or log if we read something unexpected, these should all be null bytes.
-            let mut iov = result.iovs().map(|buf| buf.to_vec()).collect::<Vec<_>>();
-            tracing::info!(?iov, "Read iov from client with file descriptor");
-            iovs.append(&mut iov);
+            // We don't expect any more data beyond the file descriptors so if there's any non-null bytes
+            // something has changed.
+            if result.iovs().flatten().any(|b| *b != 0) {
+                tracing::error!("Unexpected non-null data found with control message; aborting");
+                return Err(anyhow!("Unexpected data provided by the client"));
+            }
         }
 
         Ok(cmsgs)
