@@ -22,7 +22,7 @@ use nix::sys::{
     signal::{self, Signal},
     stat::Mode,
 };
-use tempfile::{tempdir, NamedTempFile};
+use tempfile::NamedTempFile;
 
 static UMASK: Once = Once::new();
 
@@ -38,27 +38,36 @@ fn run_command(mut client_command: Command) -> Result<(Output, Output)> {
     });
     let _socket_permit = SOCKET_PERMIT.lock().unwrap();
 
+    let working_dir = "/run/pesign/";
     let socket_path = "/run/pesign/socket";
     if let Ok(_metadata) = std::fs::metadata(socket_path) {
         return Err(anyhow!(
             "{socket_path} exists; unable to start test instance"
         ));
     };
-    let working_dir = tempdir()?;
+
     let mut server_command = Command::cargo_bin("sigul-pesign-bridge")?;
     server_command
-        .env("RUNTIME_DIRECTORY", working_dir.path())
+        .env("RUNTIME_DIRECTORY", working_dir)
         .env("SIGUL_PESIGN_BRIDGE_LOG", "trace")
         .arg("listen")
         .stderr(Stdio::piped())
         .stdout(Stdio::piped());
-    let service = server_command.spawn()?;
+    let mut service = server_command.spawn()?;
 
     let mut tries = 0;
     while let Err(error) = std::fs::metadata(socket_path) {
         std::thread::sleep(Duration::from_millis(5));
         tries += 1;
         if tries > 100 {
+            if let Ok(Some(status)) = service.try_wait() {
+                let service_output = service.wait_with_output()?;
+                println!(
+                    "exited: {:?}\nservice_stderr: {}",
+                    status,
+                    String::from_utf8_lossy(&service_output.stderr)
+                );
+            }
             return Err(anyhow!("Failed to start service: {error:?}"));
         }
     }

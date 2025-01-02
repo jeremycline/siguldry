@@ -2,7 +2,6 @@
 // Copyright (c) Microsoft Corporation.
 
 use std::{
-    env,
     ffi::CStr,
     fs::File,
     io::{self, IoSliceMut},
@@ -10,7 +9,7 @@ use std::{
         fd::{AsFd, AsRawFd, FromRawFd, RawFd},
         unix::fs::PermissionsExt,
     },
-    path::Path,
+    path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
 };
@@ -20,7 +19,7 @@ use bytes::BufMut;
 use nix::{
     cmsg_space,
     sys::{
-        socket::{MsgFlags, UnixAddr},
+        socket::{ControlMessageOwned, MsgFlags, UnixAddr},
         stat::Mode,
     },
 };
@@ -115,6 +114,23 @@ impl TryFrom<&[u8]> for Header {
 struct SignAttachedRequest {
     token_name: String,
     certificate_name: String,
+}
+
+impl SignAttachedRequest {
+    fn key<'a>(&self, available_keys: &'a [Key]) -> Result<&'a Key, anyhow::Error> {
+        available_keys
+            .iter()
+            .find(|key| {
+                key.key_name == self.token_name && key.certificate_name == self.certificate_name
+            })
+            .ok_or_else(|| {
+                tracing::error!(
+                    request=?self,
+                    "Configuration does not have the requested key/cert pair"
+                );
+                anyhow!("Client requested a token and certificate name we don't know about!")
+            })
+    }
 }
 
 impl TryFrom<&[u8]> for SignAttachedRequest {
@@ -221,39 +237,39 @@ impl TryFrom<u32> for Command {
 /// completes.
 #[instrument(err, skip_all)]
 pub(crate) fn listen(
+    runtime_directory: PathBuf,
     config: Config,
     halt_token: CancellationToken,
 ) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
-    let listener = UnixListener::bind(&config.socket_path)
-        .with_context(|| format!("Failed to bind to {}", &config.socket_path.display()))?;
-    let metadata = std::fs::metadata(&config.socket_path)?;
+    let socket_path = runtime_directory.join("socket");
+    let listener = UnixListener::bind(&socket_path)
+        .with_context(|| format!("Failed to bind to {}", &socket_path.display()))?;
+    let metadata = std::fs::metadata(&socket_path)?;
     if metadata.permissions().mode() & Mode::S_IRWXO.bits() != 0 {
         tracing::error!(mode=?metadata.permissions(), "Service socket has dangerous permissions!");
-        std::fs::remove_file(&config.socket_path).with_context(|| {
-            format!("Failed to remove socket {}", &config.socket_path.display())
-        })?;
+        std::fs::remove_file(&socket_path)
+            .with_context(|| format!("Failed to remove socket {}", &socket_path.display()))?;
         return Err(anyhow!(
             "Other users have access to the socket, adjust the service umask!"
         ));
     }
-    tracing::info!(socket=?config.socket_path, "Listening");
+    tracing::info!(socket=?socket_path, "Listening");
 
     let request_tracker = TaskTracker::new();
-
     Ok(tokio::spawn(async move {
         loop {
             tokio::select! {
                 _ = halt_token.cancelled() => {
-                    tracing::info!(socket=?config.socket_path, "Shutdown requested, no new requests will be accepted");
+                    tracing::info!(socket=?socket_path, "Shutdown requested, no new requests will be accepted");
                     break;
                 }
                 result = listener.accept() => {
                     match result {
                         Ok((unix_stream, _)) => {
-                            request_tracker.spawn(request(config.clone(), unix_stream).instrument(tracing::Span::current()));
+                            request_tracker.spawn(request(runtime_directory.clone(), config.clone(), unix_stream).instrument(tracing::Span::current()));
                         },
                         Err(error) => {
-                            tracing::error!(socket=?config.socket_path, ?error, "Failed to accept request");
+                            tracing::error!(socket=?socket_path, ?error, "Failed to accept request");
                         },
                     }
                 }
@@ -262,9 +278,9 @@ pub(crate) fn listen(
 
         // Remove the socket and then wait for any requests in progress to complete before
         // exiting.
-        std::fs::remove_file(&config.socket_path)
-            .with_context(|| format!("Failed to remove socket {}", &config.socket_path.display()))?;
-        tracing::debug!(socket=?config.socket_path, "Successfully removed socket");
+        std::fs::remove_file(&socket_path)
+            .with_context(|| format!("Failed to remove socket {}", &socket_path.display()))?;
+        tracing::debug!(socket=?socket_path, "Successfully removed socket");
         tracing::info!(
             pending_requests = request_tracker.len(),
             "Waiting for pending requests to complete"
@@ -277,10 +293,14 @@ pub(crate) fn listen(
 }
 
 #[instrument(skip_all, ret, fields(request_id = uuid::Uuid::now_v7().to_string()))]
-async fn request(config: Config, unix_stream: UnixStream) -> Result<(), anyhow::Error> {
+async fn request(
+    runtime_directory: PathBuf,
+    config: Config,
+    unix_stream: UnixStream,
+) -> Result<(), anyhow::Error> {
     let result = tokio::time::timeout(
         Duration::from_secs(config.request_timeout_secs.get()),
-        request_handler(config, unix_stream),
+        request_handler(runtime_directory, config, unix_stream),
     )
     .await;
     if result.is_err() {
@@ -290,7 +310,11 @@ async fn request(config: Config, unix_stream: UnixStream) -> Result<(), anyhow::
     result?
 }
 
-async fn request_handler(config: Config, mut unix_stream: UnixStream) -> Result<(), anyhow::Error> {
+async fn request_handler(
+    runtime_directory: PathBuf,
+    config: Config,
+    mut unix_stream: UnixStream,
+) -> Result<(), anyhow::Error> {
     loop {
         // Read the command header, which gives us the requested command and payload size.
         let mut buf = [0_u8; PESIGN_HEADER_SIZE];
@@ -304,12 +328,26 @@ async fn request_handler(config: Config, mut unix_stream: UnixStream) -> Result<
                         get_command_version(&mut unix_stream, request.payload_length).await
                     }
                     Command::SignAttachedWithFileType => {
-                        sign_attached_with_filetype(
+                        let result = sign_attached_with_filetype(
+                            &runtime_directory,
                             &config,
                             &mut unix_stream,
                             request.payload_length,
                         )
-                        .await
+                        .await;
+
+                        let mut buf = bytes::BytesMut::new();
+                        buf.put_u32_ne(PESIGND_VERSION);
+                        buf.put_u32_ne(CMD_RESPONSE);
+                        buf.put_u32_ne(std::mem::size_of::<i32>() as u32);
+                        if result.is_err() {
+                            buf.put_i32_ne(-1_i32);
+                        } else {
+                            buf.put_i32_ne(0_i32);
+                        }
+                        unix_stream.write_all_buf(&mut buf).await?;
+
+                        result
                     }
                     _unsupported => {
                         // A well-behaved client should never do this: it queries for the command version
@@ -396,52 +434,34 @@ async fn get_command_version(
     }
 }
 
-/// Handle signing requests from the pesign-client.
-///
-/// # Example
-///
-/// $ pesign-client --sign \
-///     --token="my token" \
-///     --certificate="my certificate" \
-///     --infile="README.md" \
-///     --outfile="README.md.signed"
-#[instrument(skip_all, ret)]
-async fn sign_attached_with_filetype(
-    config: &Config,
-    connection: &mut UnixStream,
-    payload_length: usize,
-) -> Result<(), anyhow::Error> {
-    // TODO: needs lots of tidying
-    let mut payload = vec![0_u8; payload_length];
-    connection.read_exact(&mut payload).await?;
-    tracing::trace!(?payload_length, ?payload, "Read payload");
+struct PesignFiles {
+    unsigned_input: File,
+    signed_output: File,
+}
 
-    let request = SignAttachedRequest::try_from(payload.as_slice())?;
-    tracing::info!(?request.token_name, ?request.certificate_name, "Client signing request received");
+impl From<[File; 2]> for PesignFiles {
+    fn from(value: [File; 2]) -> Self {
+        // pesign sends the input file descriptor first, then the output file descriptor.
+        let [unsigned_input, signed_output] = value;
+        Self {
+            unsigned_input,
+            signed_output,
+        }
+    }
+}
 
-    let key = config
-        .keys
-        .iter()
-        .find(|key| {
-            key.key_name == request.token_name && key.certificate_name == request.certificate_name
-        })
-        .ok_or_else(|| {
-            tracing::error!(
-                ?request,
-                "Configuration does not have the requested key/cert pair"
-            );
-            anyhow!("Client requested a token and certificate name we don't know about!")
-        })?;
-
-    // Both the Rust standard library and tokio don't include support for ancillary data
-    // over Unix sockets. Instead, we use the nix library's blocking interface to retrieve
-    // the file descriptors from the client.
-    //
-    // https://github.com/rust-lang/rust/issues/76915
+// Helper to get the file descriptors pesign-client sends over the Unix socket.
+//
+// Both the Rust standard library and tokio don't include support for ancillary data
+// over Unix sockets. Instead, we use the nix library's blocking interface to retrieve
+// the file descriptors from the client.
+//
+// https://github.com/rust-lang/rust/issues/76915
+async fn get_files_from_conn(connection: &mut UnixStream) -> anyhow::Result<PesignFiles> {
     let raw_fd = connection.as_fd().as_raw_fd();
     let span = tracing::Span::current();
-    let cmsgs = tokio::task::spawn_blocking(move || {
-        let _enter = span.enter();
+    tokio::task::spawn_blocking(move || {
+        let _entered = span.enter();
         let mut cmsgs = vec![];
 
         // First one is fdin, second is fdout
@@ -491,10 +511,13 @@ async fn sign_attached_with_filetype(
             }
         }
 
-        Ok(cmsgs)
+        convert_cmsgs_to_files(cmsgs)
     })
-    .await??;
+    .await?
+}
 
+// Take the control messages and convert the raw file descriptors to [`PesignFiles`].
+fn convert_cmsgs_to_files(cmsgs: Vec<ControlMessageOwned>) -> anyhow::Result<PesignFiles> {
     let mut files = vec![];
     for cmsg in cmsgs {
         match cmsg {
@@ -531,18 +554,46 @@ async fn sign_attached_with_filetype(
         }
     }
 
-    let [mut pe_client_input_file, mut pe_client_output_file]: [File; 2] = files
+    let files: [File; 2] = files
         .try_into()
         .map_err(|error| anyhow!("Client did not send the expected number of files: {error:?}"))?;
+    Ok(files.into())
+}
 
-    let runtime_directory = env::var("RUNTIME_DIRECTORY").unwrap_or_else(|error| {
-        tracing::warn!(?error, "Failed to read RUNTIME_DIRECTORY environment variable, falling back to /run/sigul-pesign-bridge/");
-        "/run/sigul-pesign-bridge/".into()
-    });
+/// Handle signing requests from the pesign-client.
+///
+/// # Example
+///
+/// $ pesign-client --sign \
+///     --token="my token" \
+///     --certificate="my certificate" \
+///     --infile="README.md" \
+///     --outfile="README.md.signed"
+///
+/// In this example, the service configuration must contain a [`Key`] with
+/// `key_name = "my token"` and `certificate_name = "my certificate"` or it will
+/// respond to the client request with a failure.
+#[instrument(skip_all, ret)]
+async fn sign_attached_with_filetype(
+    runtime_directory: &Path,
+    config: &Config,
+    connection: &mut UnixStream,
+    payload_length: usize,
+) -> Result<(), anyhow::Error> {
+    let mut payload = vec![0_u8; payload_length];
+    connection.read_exact(&mut payload).await?;
+    tracing::trace!(?payload_length, ?payload, "Read payload");
+
+    let request = SignAttachedRequest::try_from(payload.as_slice())?;
+    tracing::info!(?request.token_name, ?request.certificate_name, "Client signing request received");
+
+    let key = request.key(&config.keys)?;
+    let mut pesign_files = get_files_from_conn(connection).await?;
+
     let temp_dir = tempfile::Builder::new()
         .prefix(".work")
         .rand_bytes(16)
-        .tempdir_in(&runtime_directory)
+        .tempdir_in(runtime_directory)
         .inspect_err(|error| {
             tracing::error!(
                 ?error,
@@ -559,7 +610,7 @@ async fn sign_attached_with_filetype(
         let mut sigul_input_file = std::fs::File::options().create(true).write(true).truncate(true).open(&sigul_input).inspect_err(|error| {
             tracing::error!(?error, path=?sigul_input, "Failed to open the temporary file used for sigul input");
         })?;
-        let input_bytes = std::io::copy(&mut pe_client_input_file, &mut sigul_input_file).inspect_err(|error| {
+        let input_bytes = std::io::copy(&mut pesign_files.unsigned_input, &mut sigul_input_file).inspect_err(|error| {
             tracing::error!(?error, path=?sigul_input, "Failed to copy the input file to a temporary file for sigul input")
         })?;
         tracing::info!(input_bytes, "Forwarding PE file to Sigul for signing");
@@ -585,20 +636,12 @@ async fn sign_attached_with_filetype(
         let mut sigul_output_file = std::fs::File::options().create(false).read(true).open(&sigul_output).inspect_err(|error| {
             tracing::error!(?error, path=?sigul_output, "Failed to open the temporary file used for sigul output");
         })?;
-        let output_bytes = std::io::copy(&mut sigul_output_file, &mut pe_client_output_file).inspect_err(|error| {
-            tracing::error!(?error, path=?sigul_input, "Failed to copy the input file to a temporary file for sigul input")
+        let output_bytes = std::io::copy(&mut sigul_output_file, &mut pesign_files.signed_output).inspect_err(|error| {
+            tracing::error!(?error, path=?sigul_input, "Failed to copy the sigul output file to the pesign input")
         })?;
         tracing::info!(output_bytes, "Signing request completed");
         Ok::<_, anyhow::Error>(())
     }).in_current_span().await??;
-
-    // TODO: If we fail to sign the binary, we need to respond with an error to the client
-    let mut buf = bytes::BytesMut::new();
-    buf.put_u32_ne(PESIGND_VERSION);
-    buf.put_u32_ne(CMD_RESPONSE);
-    buf.put_u32_ne(4_u32);
-    buf.put_i32_ne(0_i32);
-    connection.write_all_buf(&mut buf).await?;
 
     Ok(())
 }
@@ -745,19 +788,18 @@ mod tests {
     async fn socket_is_cleaned_up() -> Result<()> {
         set_umask();
         let socket_dir = tempfile::tempdir()?;
-        let config = Config {
-            socket_path: socket_dir.path().join("socket"),
-            ..Default::default()
-        };
+        let socket_path = socket_dir.path().join("socket");
+        let config = Config::default();
         let cancel_token = CancellationToken::new();
 
-        let server_task = super::listen(config.clone(), cancel_token.clone())?;
+        let server_task =
+            super::listen(socket_dir.path().to_owned(), config, cancel_token.clone())?;
 
-        let _ = std::fs::metadata(&config.socket_path)?;
+        let _ = std::fs::metadata(&socket_path)?;
         cancel_token.cancel();
         server_task.await??;
 
-        if let Ok(_metadata) = std::fs::metadata(&config.socket_path) {
+        if let Ok(_metadata) = std::fs::metadata(&socket_path) {
             panic!("The socket was not cleaned up!");
         }
 
@@ -770,17 +812,14 @@ mod tests {
     async fn rejects_large_payloads() -> Result<()> {
         set_umask();
         let socket_dir = tempfile::tempdir()?;
-        let config = Config {
-            socket_path: socket_dir.path().join("socket"),
-            ..Default::default()
-        };
+        let socket_path = socket_dir.path().join("socket");
+        let config = Config::default();
         let cancel_token = CancellationToken::new();
 
-        let server_task = super::listen(config.clone(), cancel_token.clone())?;
+        let server_task =
+            super::listen(socket_dir.path().to_owned(), config, cancel_token.clone())?;
         let client_task = tokio::spawn(async move {
-            let mut conn = tokio::net::UnixStream::connect(&config.socket_path)
-                .await
-                .unwrap();
+            let mut conn = tokio::net::UnixStream::connect(socket_path).await.unwrap();
 
             let mut buf = BytesMut::new();
             buf.put_u32_ne(PESIGND_VERSION);
@@ -812,18 +851,18 @@ mod tests {
     async fn listen_waits_for_outstanding_tasks() -> Result<()> {
         set_umask();
         let socket_dir = tempfile::tempdir()?;
-        let config = Config {
-            socket_path: socket_dir.path().join("socket"),
-            ..Default::default()
-        };
+        let socket_path = socket_dir.path().join("socket");
+        let config = Config::default();
         let cancel_token = CancellationToken::new();
 
-        let server_task = super::listen(config.clone(), cancel_token.clone())?;
+        let server_task = super::listen(
+            socket_dir.path().to_owned(),
+            config.clone(),
+            cancel_token.clone(),
+        )?;
 
         let client_task = tokio::spawn(async move {
-            let mut conn = tokio::net::UnixStream::connect(&config.socket_path)
-                .await
-                .unwrap();
+            let mut conn = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
 
             cancel_token.cancel();
 

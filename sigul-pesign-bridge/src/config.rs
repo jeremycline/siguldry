@@ -1,35 +1,16 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) Microsoft Corporation.
+
 //! Available configuration for `sigul-pesign-bridge`.
-//!
-//!
 
 use std::{num::NonZeroU64, path::PathBuf};
 
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 
 /// The configuration file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// The directory where the service stores temporary files.
-    ///
-    /// These temporary files are the PE applications (both signed and unsigned) that are passed to
-    /// the Sigul client. As such, this directory should be as secure as the directory that contains
-    /// the service socket as an attacker could substitute the input or output file with a malicious
-    /// file that could either be signed by the service, or injected into an RPM.
-    ///
-    /// However, as anyone with access to the socket can get a PE application signed, the use of temporary
-    /// files should be as safe as the socket. This directory should be read/writeable only to the service
-    /// owner/group. Furthermore, this is used as the base for temporary directories that are read/writable
-    /// solely to the owner.
-    pub work_directory: PathBuf,
-
-    /// The path to use for the service Unix socket.
-    ///
-    /// This directory should be read/writable only to the service owner and the group which should be allowed
-    /// to sign files. There is no authentication on requests, so anyone with access to the socket can sign
-    /// files.
-    pub socket_path: PathBuf,
-
     /// The systemd credentials ID of the Sigul client configuration.
     ///
     /// This configuration file includes the password to access the NSS database that contains the
@@ -103,7 +84,13 @@ impl Key {
             .context("You (or systemd) must set the CREDENTIALS_DIRECTORY environment variable")?;
         credentials_path.push(&self.passphrase_path);
         let mut passphrase = std::fs::read_to_string(credentials_path)?;
-        // TODO: decide on how to handle a passphrase file with newlines (split and take the first line, reject?)
+        if passphrase.contains('\n') {
+            return Err(anyhow!(
+                "Passphrase file {} contains a newline, which is not allowed.",
+                self.passphrase_path.display()
+            ));
+        }
+
         passphrase.push('\0');
         Ok(passphrase)
     }
@@ -120,6 +107,25 @@ impl Config {
         config_path.push(&self.sigul_client_config);
         Ok(config_path)
     }
+
+    /// Check the configuration file for validity.
+    ///
+    /// An error is returned if the files referenced do not exist, or if any of them contain invalid
+    /// values.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self
+            .keys
+            .iter()
+            .map(|k| k.passphrase().err().inspect(|e| tracing::error!(error=%e)))
+            .any(|err| err.is_some())
+        {
+            return Err(anyhow!(
+                "One or more passphrase files are missing or contain newlines"
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 impl std::fmt::Display for Config {
@@ -135,8 +141,6 @@ impl std::fmt::Display for Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            work_directory: PathBuf::from("/run/pesign/"),
-            socket_path: PathBuf::from("/run/pesign/socket"),
             request_timeout_secs: NonZeroU64::new(60 * 15).expect("Don't set the default to 0"),
             keys: vec![Key::default()],
             sigul_client_config: PathBuf::from("sigul-client-config"),

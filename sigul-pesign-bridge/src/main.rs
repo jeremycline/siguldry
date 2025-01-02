@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) Microsoft Corporation.
 
+use anyhow::Context;
 use clap::Parser;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio_util::sync::CancellationToken;
@@ -26,8 +27,25 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let opts = cli::Cli::parse();
     match opts.command {
-        cli::Command::Listen => {
-            service::listen(opts.config.unwrap_or_default(), halt_token)?.await?
+        cli::Command::Listen { runtime_directory } => {
+            // if multiple runtime directories were provided, we don't know which to use so panic for now.
+            if runtime_directory
+                .to_str()
+                .ok_or(anyhow::anyhow!(
+                    "runtime_directory must be valid unicode characters"
+                ))?
+                .contains(':')
+            {
+                return Err(anyhow::anyhow!(
+                    "Multiple RuntimeDirectories are not supported"
+                ));
+            }
+            let config = opts.config.unwrap_or_default();
+            config.validate().context(
+                "configuration format is correct, but references files that are missing or invalid",
+            )?;
+
+            service::listen(runtime_directory, config, halt_token)?.await?
         }
         cli::Command::Config => {
             println!("{}", opts.config.unwrap_or_default());

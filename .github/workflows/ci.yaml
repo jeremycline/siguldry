@@ -147,7 +147,7 @@ jobs:
 
           # We aren't running under systemd here, so make up a fake CREDENTIALS_DIRECTORY
           mkdir -p /srv/siguldry/mock_credentials/
-          echo "my-signing-password" > /srv/siguldry/mock_credentials/sigul-signing-key-passphrase
+          echo -n "my-signing-password" > /srv/siguldry/mock_credentials/sigul-signing-key-passphrase
           cp ./devel/github/client.conf /srv/siguldry/mock_credentials/sigul-client-config
 
       - name: Integration tests
