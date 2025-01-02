@@ -41,15 +41,20 @@ RUN echo "my-nss-password" > nss_db_password
 RUN echo "this is a noise file to generate a key from, but we don't care about it being secure" > seed_file
 RUN certutil -z ./seed_file -d /var/lib/sigul -N -f nss_db_password
 RUN certutil -z ./seed_file -d /var/lib/sigul -S -f nss_db_password -n my-ca -s 'CN=My CA' -t CT,, -x -v 120
-RUN certutil -z ./seed_file -d /var/lib/sigul -S -f nss_db_password -n sigul-bridge -s 'CN=sigul-bridge' -c my-ca -t u,, -v 120
-RUN certutil -z ./seed_file -d /var/lib/sigul -S -f nss_db_password -n sigul-server -s 'CN=sigul-server' -c my-ca -t u,, -v 120
+# Altering the CNs here requires altering the sigul-{client,server}.conf settings to match, and DNS resolution
+# needs to work as well. It's easiest to just run everything with localhost.
+RUN certutil -z ./seed_file -d /var/lib/sigul -S -f nss_db_password -n sigul-bridge-local -s 'CN=localhost' -c my-ca -t u,, -v 120
+RUN certutil -z ./seed_file -d /var/lib/sigul -S -f nss_db_password -n sigul-server-local -s 'CN=localhost' -c my-ca -t u,, -v 120
+RUN certutil -z ./seed_file -d /var/lib/sigul -S -f nss_db_password -n sigul-bridge-gh -s 'CN=sigul-bridge' -c my-ca -t u,, -v 120
+RUN certutil -z ./seed_file -d /var/lib/sigul -S -f nss_db_password -n sigul-server-gh -s 'CN=sigul-server' -c my-ca -t u,, -v 120
 RUN certutil -z ./seed_file -d /var/lib/sigul -S -f nss_db_password -n sigul-client -s 'CN=sigul-client' -c my-ca -t u,, -v 120
 # The sigul server crashes if you don't create its keys directory.
 RUN mkdir -p /var/lib/sigul/keys
 RUN chown -R sigul:sigul /var/lib/sigul/
-COPY devel/sigul-bridge.conf /etc/sigul/bridge.conf
-COPY devel/sigul-server.conf /etc/sigul/server.conf
-COPY devel/sigul-client.conf /etc/sigul/client.conf
+COPY devel/local/bridge.conf /etc/sigul/bridge.conf
+COPY devel/local/server.conf /etc/sigul/server.conf
+COPY devel/local/client.conf /etc/sigul/client.conf
+COPY devel/github /etc/sigul-pesign-bridge-ci
 COPY devel/sigul_key_setup.sh /usr/local/bin/sigul_key_setup
 COPY devel/startup_wrapper.sh /usr/local/bin/sigul_wrapper
 

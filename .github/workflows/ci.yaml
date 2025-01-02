@@ -114,15 +114,15 @@ jobs:
         image: quay.io/jeremycline/sigul-pesign-bridge-ci:latest
         env:
           RUN_SIGUL_BRIDGE: true
-        ports:
-          # Server connects to this port
-          - 44333:44333
-          # Client connects to this port
-          - 44334:44334
+        volumes:
+          - ./devel/github:/etc/sigul
+          
       sigul-server:
         image: quay.io/jeremycline/sigul-pesign-bridge-ci:latest
         env:
           RUN_SIGUL_SERVER: true
+        volumes:
+          - ./devel/github:/etc/sigul
 
     steps:
       - uses: actions/checkout@v4
@@ -134,7 +134,7 @@ jobs:
           set -xeuo pipefail
 
           mkdir -p ~/.sigul
-          cp devel/sigul-client.conf ~/.sigul/client.conf
+          cp devel/github/client.conf ~/.sigul/client.conf
           cp -r /var/lib/sigul ~/.sigul/sigul
           bash ./devel/sigul_key_setup.sh
 
