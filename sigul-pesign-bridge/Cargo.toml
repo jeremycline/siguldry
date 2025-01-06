@@ -5,6 +5,10 @@ rust-version = "1.79"
 edition = "2021"
 license = "MIT"
 readme = "README.md"
+description = """
+Drop-in replacement for pesign's daemon that bridges pesign-client requests
+to a Sigul server.
+"""
 keywords = ["pesign", "sigul", "fedora"]
 categories = ["command-line-utilities"]
 repository = "https://github.com/jeremycline/siguldry"

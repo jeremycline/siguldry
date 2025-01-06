@@ -1,5 +1,5 @@
 # sigul-pesign-bridge
-Bridge pesign-client requests to a Sigul server
+Drop-in replacement for pesign's daemon that bridges pesign-client requests to a Sigul server.
 
 # Integration test setup
 
