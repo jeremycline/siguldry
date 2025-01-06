@@ -497,7 +497,7 @@ async fn get_files_from_conn(connection: &mut UnixStream) -> anyhow::Result<Pesi
                 .cmsgs()
                 .context("Not enough space was allocated for control messages")?
                 .collect::<Vec<_>>();
-            tracing::info!(
+            tracing::debug!(
                 ?cmsg,
                 "Read control message from client with file descriptor"
             );
@@ -677,9 +677,8 @@ async fn forward_pe_file(
     let result = tokio::time::timeout(Duration::from_secs(30), async {
         if let Some(stdin) = &mut child.stdin {
             stdin.write_all(passphrase.as_bytes()).await?;
-            tracing::debug!("Wrote password to stdin");
+            tracing::debug!("Wrote Sigul key passphrase to child's stdin");
         }
-        tracing::debug!("Waiting on child to complete");
         child.wait_with_output().await
     })
     .await??;
