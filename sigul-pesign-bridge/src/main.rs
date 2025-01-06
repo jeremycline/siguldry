@@ -48,8 +48,11 @@ async fn main() -> Result<(), anyhow::Error> {
             service::listen(runtime_directory, config, halt_token)?.await?
         }
         cli::Command::Config => {
-            println!("{}", opts.config.unwrap_or_default());
-            Ok(())
+            let config = opts.config.unwrap_or_default();
+            println!("Current configuration:\n\n{}", config);
+            config.validate().inspect_err(|err|{
+                eprintln!("The configuration format is correct, but references files that are missing or invalid: {}", err);
+            })
         }
     }
 }
