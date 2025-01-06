@@ -298,8 +298,10 @@ async fn request(
     config: Config,
     unix_stream: UnixStream,
 ) -> Result<(), anyhow::Error> {
+    // Requests to Sigul are guarded by a timeout, we'll grant 10 extra seconds before shutting
+    // down the whole request. This is necessary for cases when the client doesn't behave as expected.
     let result = tokio::time::timeout(
-        Duration::from_secs(config.request_timeout_secs.get()),
+        Duration::from_secs(config.request_timeout_secs.get() + 10),
         request_handler(runtime_directory, config, unix_stream),
     )
     .await;
@@ -618,15 +620,20 @@ async fn sign_attached_with_filetype(
         Ok::<_, anyhow::Error>(sigul_input)
     }).await??;
 
-    // TODO Might want to come up with a more elegant retry since this relies on the request timeout
-    // and then we never respond to the client.
     let sigul_client_config = config.sigul_client_config()?;
-    while let Err(error) =
-        forward_pe_file(&sigul_client_config, key, &sigul_input, &sigul_output).await
-    {
-        tracing::warn!(%error, "signing failed; retrying sigul client in 2 seconds");
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
+    tokio::time::timeout(
+        Duration::from_secs(config.request_timeout_secs.get() + 10),
+        async {
+            while let Err(error) =
+                forward_pe_file(&sigul_client_config, key, &sigul_input, &sigul_output).await
+            {
+                tracing::warn!(%error, "signing failed; retrying sigul client in 2 seconds");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        },
+    )
+    .await
+    .context("Timeout reached while waiting for Sigul")?;
 
     // TODO validate signed PE with the configured certificate here
 
