@@ -635,7 +635,38 @@ async fn sign_attached_with_filetype(
     .await
     .context("Timeout reached while waiting for Sigul")?;
 
-    // TODO validate signed PE with the configured certificate here
+    if let Some(signing_cert) = &key.certificate_file {
+        tracing::info!("Certificate file is provided for this key; validating with 'sbverify'");
+        let mut command = tokio::process::Command::new("sbverify");
+        command
+            .arg("--cert")
+            .arg(signing_cert)
+            .arg(&sigul_output)
+            .kill_on_drop(true);
+        let result = tokio::time::timeout(Duration::from_secs(5), command.output()).await;
+        match result {
+            Ok(Ok(output)) => {
+                if output.status.success() {
+                    tracing::info!("PE file signature validated");
+                } else {
+                    tracing::error!(?output, "PE file is not signed as expected!");
+                    return Err(anyhow!("PE file failed signature validation"));
+                }
+            }
+            Ok(Err(error)) => {
+                tracing::error!(?error, ?command, "Unable to run sbverify command");
+                return Err(anyhow!(
+                    "PE file signature validation requested, but failed to run"
+                ));
+            }
+            Err(_error) => {
+                tracing::error!(?command, "Command failed to finish withint 5 seconds");
+                return Err(anyhow!(
+                    "PE file signature validation requested, but timed out"
+                ));
+            }
+        }
+    }
 
     let span = tracing::Span::current();
     tokio::task::spawn_blocking(move || {
@@ -676,6 +707,7 @@ async fn forward_pe_file(
             &key.certificate_name,
             input.to_str().unwrap(),
         ])
+        .kill_on_drop(true)
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
         .stdout(Stdio::piped());

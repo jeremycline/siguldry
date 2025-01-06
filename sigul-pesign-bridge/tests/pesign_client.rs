@@ -46,10 +46,30 @@ fn run_command(mut client_command: Command) -> Result<(Output, Output)> {
         ));
     };
 
+    let mut signing_cert = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    signing_cert.push("../keys/signing-cert.pem");
+    let mut config_file = tempfile::NamedTempFile::new()?;
+    let config = format!(
+        "
+    sigul_client_config = \"sigul-client-config\"
+    request_timeout_secs = 30
+
+    [[keys]]
+    key_name = \"signing-key\"
+    certificate_name = \"codesigning\"
+    passphrase_path = \"sigul-signing-key-passphrase\"
+    certificate_file = \"{}\"
+    ",
+        signing_cert.display()
+    );
+    config_file.write_all(config.as_bytes()).unwrap();
+    config_file.flush().unwrap();
+
     let mut server_command = Command::cargo_bin("sigul-pesign-bridge")?;
     server_command
         .env("RUNTIME_DIRECTORY", working_dir)
         .env("SIGUL_PESIGN_BRIDGE_LOG", "trace")
+        .env("SIGUL_PESIGN_BRIDGE_CONFIG", config_file.path())
         .arg("listen")
         .stderr(Stdio::piped())
         .stdout(Stdio::piped());

@@ -61,7 +61,8 @@ pub struct Key {
     /// The ID used in the systemd encrypted credential.
     pub passphrase_path: PathBuf,
     /// If set, the service will validate the PE has been signed with the given certificate
-    /// before returning the signed file to the client.
+    /// before returning the signed file to the client. This validation is done with the
+    /// "sbverify" application, which must be installed to use this option.
     pub certificate_file: Option<PathBuf>,
 }
 
@@ -124,6 +125,18 @@ impl Config {
             ));
         }
 
+        if self.keys.iter().any(|key| key.certificate_file.is_some()) {
+            let mut command = std::process::Command::new("sbverify");
+            command.arg("--help");
+            let output = command.output()?;
+            if !output.status.success() {
+                return Err(anyhow!(
+                    "sbverify needs to be installed and functional: {:?}",
+                    output
+                ));
+            }
+        }
+
         Ok(())
     }
 }
@@ -151,10 +164,11 @@ impl Default for Config {
 pub(crate) fn load(path: &str) -> anyhow::Result<Config> {
     let config = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read from path {path:?}"))?;
+    tracing::info!(%path, "Read from configuration file");
     toml::from_str(&config)
         .inspect_err(|error| {
-            println!("Failed to parse configuration loaded from {path:?}:\n{error}");
-            println!("Example config file:\n\n{}", Config::default());
+            tracing::error!("Failed to parse configuration loaded from {path:?}:\n{error}");
+            tracing::info!("Example config file:\n\n{}", Config::default());
         })
         .context("configuration file is invalid")
 }
