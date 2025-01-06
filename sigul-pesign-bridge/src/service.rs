@@ -253,7 +253,7 @@ pub(crate) fn listen(
             "Other users have access to the socket, adjust the service umask!"
         ));
     }
-    tracing::info!(socket=?socket_path, "Listening");
+    tracing::info!(socket=?socket_path, mode=?metadata.permissions(), "Listening");
 
     let request_tracker = TaskTracker::new();
     Ok(tokio::spawn(async move {

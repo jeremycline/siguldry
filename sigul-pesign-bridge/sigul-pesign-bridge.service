@@ -3,19 +3,19 @@ Description=Bridge pesign-client requests to Sigul
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/sigul-pesign-bridge listen
-User=pesign
-Group=pesign
-Restart=on-failure
 # Refer to https://docs.rs/tracing-subscriber/0.3.19/tracing_subscriber/filter/struct.EnvFilter.html#directives
 # for more fine-grain logging output.
 Environment=SIGUL_PESIGN_BRIDGE_LOG=info
 Environment=SIGUL_PESIGN_BRIDGE_CONFIG=/etc/sigul-pesign-bridge/config.toml
+ExecStart=/usr/bin/sigul-pesign-bridge listen
+User=pesign
+Group=pesign
+Restart=on-failure
 
 # The socket relies on filesystem permissions to control who can request
 # signatures; no other authentication is used so it's important the socket
 # is not world-readable.
-UMask=027
+UMask=017
 
 # If the location of the socket is altered, this should be adjusted.
 #
@@ -25,6 +25,33 @@ RuntimeDirectory=pesign
 RuntimeDirectoryMode=750
 ConfigurationDirectory=sigul-pesign-bridge
 ConfigurationDirectoryMode=750
+
+# Opt-in to most systemd sandboxing
+CapabilityBoundingSet=
+LockPersonality=true
+MemoryDenyWriteExecute=true
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectProc=invisible
+ProtectSystem=strict
+RemoveIPC=true
+# The service offers a Unix socket and communicates with the Sigul bridge over the network.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+SystemCallErrorNumber=EPERM
+# This can likely be restricted further
+SystemCallFilter=@system-service
 
 # The service needs to authenticate with Sigul. It does this via a
 # password-protected TLS certificate. The password can be provided
@@ -39,24 +66,3 @@ ConfigurationDirectoryMode=750
 # $ systemd-creds encrypt /secure/ramfs/sigul-client.conf /etc/sigul-pesign-bridge/sigul-client-conf
 LoadCredentialEncrypted=sigul-signing-key-passphrase:/etc/sigul-pesign-bridge/sigul-signing-key-passphrase
 LoadCredentialEncrypted=sigul-client-config:/etc/sigul-pesign-bridge/sigul-client-config
-
-# Opt-in to most systemd sandboxing
-PrivateTmp=true
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-PrivateDevices=true
-ProtectClock=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectKernelLogs=true
-ProtectControlGroups=true
-# The service offers a Unix socket and communicates with the Sigul bridge over TLS.
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-LockPersonality=true
-MemoryDenyWriteExecute=true
-RestrictRealtime=true
-RestrictSUIDSGID=true
-# This can likely be restricted further
-SystemCallFilter=@system-service
-SystemCallErrorNumber=EPERM
