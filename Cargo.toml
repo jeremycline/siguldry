@@ -3,4 +3,5 @@ resolver = "2"
 members = [ 
     "sample-uefi",
     "sigul-pesign-bridge",
+    "xtask",
 ]

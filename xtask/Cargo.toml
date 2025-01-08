@@ -1,0 +1,19 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies.anyhow]
+version = "1.0.47"
+
+[dependencies.clap_mangen]
+version = "0.2"
+
+[dependencies.clap]
+version = "4"
+
+[dependencies.sigul-pesign-bridge]
+path = "../sigul-pesign-bridge"
+version = "0.1"
