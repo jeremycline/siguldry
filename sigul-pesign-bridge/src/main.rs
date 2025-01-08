@@ -8,9 +8,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, EnvFilter};
 
-mod cli;
-mod config;
-mod service;
+use sigul_pesign_bridge::{cli, listen};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), anyhow::Error> {
@@ -56,7 +54,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 "configuration format is correct, but references files that are missing or invalid",
             )?;
 
-            service::listen(runtime_directory, config, halt_token)?.await?
+            listen(runtime_directory, config, halt_token)?.await?
         }
         cli::Command::Config => {
             let config = opts.config.unwrap_or_default();

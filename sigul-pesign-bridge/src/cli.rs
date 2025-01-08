@@ -19,7 +19,7 @@ use crate::config::{self, Config};
 /// "error"), or more complex filtering at the model, span, or event level.
 #[derive(Parser, Debug)]
 #[command(version)]
-pub(crate) struct Cli {
+pub struct Cli {
     /// Path to the configuration file.
     ///
     /// If no path is provided, the defaults are used. To view the service
@@ -31,7 +31,7 @@ pub(crate) struct Cli {
 }
 
 #[derive(clap::Subcommand, Debug)]
-pub(crate) enum Command {
+pub enum Command {
     /// Run the service.
     ///
     /// The service provides a Unix socket at, by default, `/run/pesign/socket`.

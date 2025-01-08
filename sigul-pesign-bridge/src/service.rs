@@ -235,8 +235,9 @@ impl TryFrom<u32> for Command {
 ///
 /// Pending requests will be allowed to complete before the task
 /// completes.
+#[doc(hidden)]
 #[instrument(err, skip_all)]
-pub(crate) fn listen(
+pub fn listen(
     runtime_directory: PathBuf,
     config: Config,
     halt_token: CancellationToken,
