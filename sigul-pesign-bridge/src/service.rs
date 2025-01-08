@@ -1,8 +1,16 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) Microsoft Corporation.
 
+//! A minimal pesign daemon implementation.
+//!
+//! This handles requests from pesign clients to sign PE applications, but only if
+//! the request is for attached signatures and the client provides the file type. This
+//! should be the case for reasonably up-to-date pesign clients requesting a signature.
+//!
+//! Other commands supported by the pesign daemon such at unlocking tokens are not
+//! supported.
+
 use std::{
-    ffi::CStr,
     fs::File,
     io::{self, IoSliceMut},
     os::{
@@ -15,7 +23,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context};
-use bytes::BufMut;
+use bytes::Bytes;
 use nix::{
     cmsg_space,
     sys::{
@@ -31,200 +39,10 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{instrument, Instrument};
 
-use crate::config::{Config, Key};
-
-/// The version of the pesign daemon interface we support.
-///
-/// The pesign-client will reject a version mis-match so if
-/// pesign adjusts the version we will stop working with it.
-/// However, as we'll likely add our own interface later this
-/// shouldn't be an issue. Probably.
-const PESIGND_VERSION: u32 = 0x2a9edaf0;
-
-const CMD_KILL_DAEMON: u32 = 0;
-const CMD_UNLOCK_TOKEN: u32 = 1;
-const CMD_SIGN_ATTACHED: u32 = 2;
-const CMD_SIGN_DETACHED: u32 = 3;
-const CMD_RESPONSE: u32 = 4;
-const CMD_IS_TOKEN_UNLOCKED: u32 = 5;
-const CMD_GET_CMD_VERSION: u32 = 6;
-const CMD_SIGN_ATTACHED_WITH_FILE_TYPE: u32 = 7;
-const CMD_SIGN_DETACHED_WITH_FILE_TYPE: u32 = 8;
-
-const PESIGN_HEADER_SIZE: usize = std::mem::size_of::<u32>() * 3;
-const PESIGN_MAX_PAYLOAD: usize = 1024;
-
-/// Describes the pesign request/response.
-///
-/// Each client request and server response starts with this header.
-/// These requests are sent over a Unix socket and use native endian
-/// byte order.
-#[derive(Debug, Copy, Clone)]
-struct Header {
-    command: Command,
-    payload_length: usize,
-}
-
-impl TryFrom<&[u8]> for Header {
-    type Error = anyhow::Error;
-
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() != PESIGN_HEADER_SIZE {
-            return Err(anyhow!("Invalid header size"));
-        }
-
-        let mut header = value
-            .chunks_exact(std::mem::size_of::<u32>())
-            .map(|chunk| chunk.try_into().map(u32::from_ne_bytes));
-
-        let pesign_version = header
-            .next()
-            .ok_or_else(|| anyhow!("Programmer error: the header should be of length 3"))??;
-
-        if pesign_version != PESIGND_VERSION {
-            return Err(anyhow!(
-                "Unsupported version of pesign (expected {}, got {})",
-                PESIGND_VERSION,
-                pesign_version
-            ));
-        }
-
-        let command: Command = header
-            .next()
-            .ok_or_else(|| anyhow!("Programmer error: the header should be of length 3"))??
-            .try_into()?;
-
-        let payload_length: usize = header
-            .next()
-            .ok_or_else(|| anyhow!("Programmer error: the header should be of length 3"))??
-            .try_into()?;
-
-        if payload_length > PESIGN_MAX_PAYLOAD {
-            return Err(anyhow!("Client declared absurd payload size"));
-        }
-
-        Ok(Self {
-            command,
-            payload_length,
-        })
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-struct SignAttachedRequest {
-    token_name: String,
-    certificate_name: String,
-}
-
-impl SignAttachedRequest {
-    fn key<'a>(&self, available_keys: &'a [Key]) -> Result<&'a Key, anyhow::Error> {
-        available_keys
-            .iter()
-            .find(|key| {
-                key.key_name == self.token_name && key.certificate_name == self.certificate_name
-            })
-            .ok_or_else(|| {
-                tracing::error!(
-                    request=?self,
-                    "Configuration does not have the requested key/cert pair"
-                );
-                anyhow!("Client requested a token and certificate name we don't know about!")
-            })
-    }
-}
-
-impl TryFrom<&[u8]> for SignAttachedRequest {
-    type Error = anyhow::Error;
-
-    /// Attempt to parse the request from the payload bytes.
-    ///
-    /// A valid request is composed of:
-    ///
-    /// 1. FILE_TYPE (u32) - The file type.
-    /// 2. TOKEN_LEN (u32) - The length of the token name string.
-    /// 3. TOKEN_NAME ([u8; TOKEN_LEN]) - A null-terminated string identifying the token
-    ///    to use when signing.
-    /// 4. CERT_LEN (u32) - The length of the certificate name string.
-    /// 5. CERT_NAME ([u8; CERT_LEN]) - A null-terminated string identifying the certificate
-    ///    to use when signing.
-    fn try_from(payload: &[u8]) -> Result<Self, Self::Error> {
-        if payload.len() < std::mem::size_of::<u32>() * 3 {
-            return Err(anyhow!("Request payload is too small"));
-        }
-
-        // pesign also defines a type for kernel modules, but at the moment we don't do anything for those.
-        let (file_type, remaining_payload) = payload.split_at(std::mem::size_of::<u32>());
-        let file_type = file_type.try_into().map(u32::from_ne_bytes)?;
-        if file_type != 0 {
-            return Err(anyhow!("Unsupported file type; only PE type supported"));
-        }
-
-        let (token_length, remaining_payload) =
-            remaining_payload.split_at(std::mem::size_of::<u32>());
-        let token_length: usize = token_length
-            .try_into()
-            .map(u32::from_ne_bytes)?
-            .try_into()?;
-        if token_length > remaining_payload.len() {
-            return Err(anyhow!(
-                "Malformed request; token length longer than payload"
-            ));
-        }
-        let (token_name, remaining_payload) = remaining_payload.split_at(token_length);
-        let token = CStr::from_bytes_until_nul(token_name)?
-            .to_str()?
-            .to_string();
-
-        let (cert_length, remaining_payload) =
-            remaining_payload.split_at(std::mem::size_of::<u32>());
-        let cert_length: usize = cert_length.try_into().map(u32::from_ne_bytes)?.try_into()?;
-        if cert_length != remaining_payload.len() {
-            return Err(anyhow!(
-                "Malformed request; certificate name length doesn't match payload size"
-            ));
-        }
-        let certificate = CStr::from_bytes_until_nul(remaining_payload)?
-            .to_str()?
-            .to_string();
-
-        Ok(Self {
-            token_name: token,
-            certificate_name: certificate,
-        })
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-enum Command {
-    Kill,
-    UnlockToken,
-    SignAttached,
-    SignDetached,
-    Response,
-    IsTokenUnlocked,
-    GetCmdVersion,
-    SignAttachedWithFileType,
-    SignDetachedWithFileType,
-}
-
-impl TryFrom<u32> for Command {
-    type Error = anyhow::Error;
-
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
-        match value {
-            CMD_KILL_DAEMON => Ok(Self::Kill),
-            CMD_UNLOCK_TOKEN => Ok(Self::UnlockToken),
-            CMD_SIGN_ATTACHED => Ok(Self::SignAttached),
-            CMD_SIGN_DETACHED => Ok(Self::SignDetached),
-            CMD_RESPONSE => Ok(Self::Response),
-            CMD_IS_TOKEN_UNLOCKED => Ok(Self::IsTokenUnlocked),
-            CMD_GET_CMD_VERSION => Ok(Self::GetCmdVersion),
-            CMD_SIGN_ATTACHED_WITH_FILE_TYPE => Ok(Self::SignAttachedWithFileType),
-            CMD_SIGN_DETACHED_WITH_FILE_TYPE => Ok(Self::SignDetachedWithFileType),
-            _ => Err(anyhow!("Unknown Command '{}'", value)),
-        }
-    }
-}
+use crate::{
+    config::{Config, Key},
+    pesign::{self, Command, Header, Response, SignAttachedRequest},
+};
 
 /// Listen on a Unix socket on the given path.
 ///
@@ -293,6 +111,11 @@ pub fn listen(
     }.instrument(tracing::Span::current())))
 }
 
+/// Process a single client request.
+///
+/// All requests are wrapped in a timeout derived from the configured request timeout.
+/// A few extra seconds are granted the request as each request is made up of several
+/// request/response pairs and each of those are guarded by a timeout.
 #[instrument(skip_all, ret, fields(request_id = uuid::Uuid::now_v7().to_string()))]
 async fn request(
     runtime_directory: PathBuf,
@@ -320,7 +143,7 @@ async fn request_handler(
 ) -> Result<(), anyhow::Error> {
     loop {
         // Read the command header, which gives us the requested command and payload size.
-        let mut buf = [0_u8; PESIGN_HEADER_SIZE];
+        let mut buf = [0_u8; pesign::PESIGN_HEADER_SIZE];
         match unix_stream.read_exact(&mut buf).await {
             Ok(_bytes_read) => {
                 let request: Header = buf.as_slice().try_into()?;
@@ -338,17 +161,8 @@ async fn request_handler(
                             request.payload_length,
                         )
                         .await;
-
-                        let mut buf = bytes::BytesMut::new();
-                        buf.put_u32_ne(PESIGND_VERSION);
-                        buf.put_u32_ne(CMD_RESPONSE);
-                        buf.put_u32_ne(std::mem::size_of::<i32>() as u32);
-                        if result.is_err() {
-                            buf.put_i32_ne(-1_i32);
-                        } else {
-                            buf.put_i32_ne(0_i32);
-                        }
-                        unix_stream.write_all_buf(&mut buf).await?;
+                        let mut response: Bytes = Response::from(&result).into();
+                        unix_stream.write_all_buf(&mut response).await?;
 
                         result
                     }
@@ -396,13 +210,6 @@ async fn get_command_version(
     connection.read_exact(&mut payload).await?;
 
     let command = u32::from_ne_bytes(payload);
-    // Send pesignd_msghdr (version, CMD_REPONSE, size) + pesignd_cmd_response (return_code i32, [u8] errmsg), command version always 0
-    let mut buf = bytes::BytesMut::new();
-    buf.put_u32_ne(PESIGND_VERSION);
-    buf.put_u32_ne(CMD_RESPONSE);
-    // Payload size (one i32, plus an optional null-terminated string of u8s)
-    // Since we never return an error string, the payload is always the size of an i32
-    buf.put_u32_ne(4_u32);
 
     match Command::try_from(command) {
         Ok(Command::GetCmdVersion | Command::SignAttachedWithFileType) => {
@@ -410,8 +217,8 @@ async fn get_command_version(
                 "Client queried for the server version of command {:?}",
                 command
             );
-            buf.put_i32_ne(0_i32);
-            connection.write_all_buf(&mut buf).await?;
+            let mut response: Bytes = Response::Success.into();
+            connection.write_all_buf(&mut response).await?;
             Ok(())
         }
         Ok(command) => {
@@ -419,8 +226,8 @@ async fn get_command_version(
                 "Client queried for the server version of command {:?}, which is not supported",
                 command
             );
-            buf.put_i32_ne(-1_i32);
-            connection.write_all_buf(&mut buf).await?;
+            let mut response: Bytes = Response::Failure.into();
+            connection.write_all_buf(&mut response).await?;
             Ok(())
         }
         Err(error) => {
@@ -430,8 +237,8 @@ async fn get_command_version(
                 queried_command = command,
                 "Unknown command version requested"
             );
-            buf.put_i32_ne(-1_i32);
-            connection.write_all_buf(&mut buf).await?;
+            let mut response: Bytes = Response::Failure.into();
+            connection.write_all_buf(&mut response).await?;
             return Err(anyhow!("get-cmd-version request was malformed"));
         }
     }
@@ -741,17 +548,15 @@ mod tests {
     use std::time::Duration;
 
     use anyhow::{anyhow, Result};
-    use bytes::{BufMut, BytesMut};
+    use bytes::{BufMut, Bytes, BytesMut};
     use nix::sys::stat::Mode;
-    use proptest::prelude::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_util::sync::CancellationToken;
+    use zerocopy::IntoBytes;
 
-    use crate::config::Config;
+    use crate::{config::Config, pesign::Header};
 
-    use super::{
-        Header, SignAttachedRequest, CMD_GET_CMD_VERSION, PESIGND_VERSION, PESIGN_MAX_PAYLOAD,
-    };
+    use super::Command;
 
     static UMASK: Once = Once::new();
 
@@ -761,65 +566,6 @@ mod tests {
             umask.insert(Mode::S_IRWXO);
             nix::sys::stat::umask(umask);
         });
-    }
-
-    proptest! {
-        // Regardless of header correctness, it should never crash.
-        #[test]
-        fn header_never_panics(payload in prop::array::uniform12(u8::MIN..u8::MAX)) {
-            let _ = Header::try_from(payload.as_slice());
-        }
-
-        #[test]
-        fn header_valid_commands(mut payload in vec![0..8u32, 0..1024u32]) {
-            payload.insert(0, PESIGND_VERSION);
-            let payload = payload.into_iter().flat_map(|b| b.to_ne_bytes()).collect::<Vec<_>>();
-            Header::try_from(payload.as_slice()).unwrap();
-        }
-
-        #[test]
-        fn header_invalid_commands(mut payload in vec![8..u32::MAX, 0..1024u32]) {
-            payload.insert(0, PESIGND_VERSION);
-            let payload = payload.into_iter().flat_map(|b| b.to_ne_bytes()).collect::<Vec<_>>();
-            if Header::try_from(payload.as_slice()).is_ok() {
-                panic!("Header shouldn't contain a command over 8");
-            }
-        }
-
-        #[test]
-        fn header_payload_size(payload_size in 0..1024u32) {
-            let payload = vec![PESIGND_VERSION, 8, payload_size];
-            let payload = payload.into_iter().flat_map(|b| b.to_ne_bytes()).collect::<Vec<_>>();
-            let result = Header::try_from(payload.as_slice());
-            if payload_size > PESIGN_MAX_PAYLOAD as u32 {
-                if result.is_ok() {
-                    panic!("Payload was too large");
-                }
-            } else {
-                result.unwrap();
-            }
-        }
-
-        // Regardless of payload correctness, it should never crash.
-        #[test]
-        fn sign_attached_request_never_panics(payload in prop::collection::vec(u8::MIN..u8::MAX, 0..PESIGN_MAX_PAYLOAD)) {
-            let _ = SignAttachedRequest::try_from(payload.as_slice());
-        }
-
-        // Generate some acceptable requests using random token and certificate names
-        #[test]
-        fn sign_attached_request(name in "\\PC+") {
-            let mut payload = Vec::from(0_u32.to_ne_bytes());
-            let name_bytes = name.as_bytes();
-            for _ in 0..2 {
-                payload.extend_from_slice((name_bytes.len() as u32 + 1).to_ne_bytes().as_slice());
-                payload.extend_from_slice(name_bytes);
-                payload.push(0);
-            }
-
-            SignAttachedRequest::try_from(payload.as_slice()).unwrap();
-        }
-
     }
 
     // Assert the socket is removed when the service stops
@@ -860,11 +606,13 @@ mod tests {
         let client_task = tokio::spawn(async move {
             let mut conn = tokio::net::UnixStream::connect(socket_path).await.unwrap();
 
-            let mut buf = BytesMut::new();
-            buf.put_u32_ne(PESIGND_VERSION);
-            buf.put_u32_ne(CMD_GET_CMD_VERSION);
-            buf.put_u32_ne(2048);
-            conn.write_all_buf(&mut buf).await.unwrap();
+            let mut header: Bytes = Header {
+                command: Command::GetCmdVersion,
+                payload_length: 2048,
+            }
+            .try_into()
+            .unwrap();
+            conn.write_all_buf(&mut header).await.unwrap();
 
             // The server should have hung up on us
             let mut response = [0_u8; 16];
@@ -909,10 +657,14 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
 
             let mut buf = BytesMut::new();
-            buf.put_u32_ne(PESIGND_VERSION);
-            buf.put_u32_ne(CMD_GET_CMD_VERSION);
-            buf.put_u32_ne(4);
-            buf.put_u32_ne(CMD_GET_CMD_VERSION);
+            let header: Bytes = Header {
+                command: Command::GetCmdVersion,
+                payload_length: std::mem::size_of::<u32>(),
+            }
+            .try_into()
+            .unwrap();
+            buf.put_slice(header.as_bytes());
+            buf.put_u32_ne(Command::GetCmdVersion.into());
             conn.write_all_buf(&mut buf).await.unwrap();
 
             let mut response = [0_u8; 16];
