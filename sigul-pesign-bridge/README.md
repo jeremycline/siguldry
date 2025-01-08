@@ -18,23 +18,27 @@ The configuration format with in-line documentation:
 #
 # This configuration file includes the password to access the NSS database that contains the
 # client certificate used to authenticate with the Sigul server. As such, it is expected to
-# be provided by systemd's "LoadCredentialsEncrypted" option.
-#
-# To prepare the encrypted configuration::
-#
-#   # systemd-creds encrypt /secure/ramfs/sigul-client.conf /etc/sigul-pesign-bridge/sigul-client.conf
-#
-# This will produce an encrypted blob which will be decrypted by systemd at runtime.
-#  
+# be provided by systemd's "LoadCredentialEncrypted" option.
+# 
 # # Example
-#
-# Suppose the systemd unit file contains the following::
-#  
-#     [Service]
-#     LoadCredentialsEncrypted=sigul-client-config:/etc/sigul-pesign-bridge/sigul-client.conf
-#
-# The credentials ID is "sigul-client-config". The decrypted file is provided to the service
-# by systemd using the path "$CREDENTIALS_PATH/sigul-client-config".
+# 
+# To prepare the encrypted configuration:
+# 
+# ```bash
+# systemd-creds encrypt /secure/ramfs/sigul-client-config /etc/sigul-pesign-bridge/sigul-client-config
+# ```
+# 
+# This will produce an encrypted blob which will be decrypted by systemd at runtime. To provide
+# the decrypted secret to the service running under systemd, add the following override to the
+# service unit:
+# 
+# ```ini
+# [Service]
+# LoadCredentialEncrypted=sigul-client-config:/etc/sigul-pesign-bridge/sigul-client-config
+# ```
+# 
+# The credentials ID is `sigul-client-config`. The decrypted file is provided to the service
+# by systemd using the path `$CREDENTIALS_PATH/sigul-client-config`.
 sigul_client_config = "sigul-client-config"
 
 # The total length of time (in seconds) to wait for a signing request to complete.
@@ -72,11 +76,6 @@ passphrase_path = "other-sigul-signing-key-passphrase"
 This document assumes the service is running under systemd using a unit file based off the one provided
 at `sigul-pesign-bridge/sigul-pesign-bridge.service`. Some set up is required as the expectation is all
 secrets are handled by systemd.
-
-### Configuration
-
-Place your TOML configuration at `/etc/sigul-pesign-bridge/config.toml`, which
-is the default set in the systemd unit file. Alternatively, adjust the unit file.
 
 ### Secrets
 
@@ -120,9 +119,14 @@ LoadCredentialEncrypted=sigul-signing-key-passphrase:/etc/sigul-pesign-bridge/si
 LoadCredentialEncrypted=other-sigul-signing-key-passphrase:/etc/sigul-pesign-bridge/other-sigul-signing-key-passphrase
 ```
 
+Now that the secrets are prepared, place your TOML configuration at
+`/etc/sigul-pesign-bridge/config.toml`, which is the default set in the systemd
+unit file. Alternatively, adjust the unit file. Ensure the secret IDs set in the
+`override.conf` match those in the TOML configuration.
+
 Finally, start the service:
 
-```
+```bash
 sudo systemctl enable --now sigul-client-config.service
 ```
 

@@ -1,7 +1,18 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) Microsoft Corporation.
 
-//! Available configuration for `sigul-pesign-bridge`.
+//! The configuration format for `sigul-pesign-bridge`.
+//!
+//! Configuration is provided via a command-line argument or environment
+//! variable (`SIGUL_PESIGN_BRIDGE_CONFIG`). The configuration should be in TOML format.
+//!
+//! The [`Config`] has several top-level settings, as well as a list of one or
+//! more signing [`Key`] settings.
+//!
+//! There is no configuration merging: a configuration file must contain
+//! settings for _all_ required fields.
+//!
+//! To validate your configuration, refer to the `sigul-pesign-bridge config` command.
 
 use std::{num::NonZeroU64, path::PathBuf};
 
@@ -15,23 +26,27 @@ pub struct Config {
     ///
     /// This configuration file includes the password to access the NSS database that contains the
     /// client certificate used to authenticate with the Sigul server. As such, it is expected to
-    /// be provided by systemd's "LoadCredentialsEncrypted" option.
+    /// be provided by systemd's "LoadCredentialEncrypted" option.
     ///
-    /// To prepare the encrypted configuration::
-    ///
-    ///   # systemd-creds encrypt /secure/ramfs/sigul-client.conf /etc/sigul-pesign-bridge/sigul-client.conf
-    ///
-    /// This will produce an encrypted blob which will be decrypted by systemd at runtime.
-    ///  
     /// # Example
     ///
-    /// Suppose the systemd unit file contains the following::
-    ///  
-    ///     [Service]
-    ///     LoadCredentialsEncrypted=sigul-client-config:/etc/sigul-pesign-bridge/sigul-client.conf
+    /// To prepare the encrypted configuration:
     ///
-    /// The credentials ID is "sigul-client-config". The decrypted file is provided to the service
-    /// by systemd using the path "$CREDENTIALS_PATH/sigul-client-config".
+    /// ```bash
+    /// systemd-creds encrypt /secure/ramfs/sigul-client-config /etc/sigul-pesign-bridge/sigul-client-config
+    /// ```
+    ///
+    /// This will produce an encrypted blob which will be decrypted by systemd at runtime. To
+    /// provide the decrypted secret to the service running under systemd, add the following
+    /// override to the service unit:
+    ///
+    /// ```ini
+    /// [Service]
+    /// LoadCredentialEncrypted=sigul-client-config:/etc/sigul-pesign-bridge/sigul-client-config
+    /// ```
+    ///
+    /// The credentials ID is `sigul-client-config`. The decrypted file is provided to the service
+    /// by systemd using the path `$CREDENTIALS_PATH/sigul-client-config`.
     pub sigul_client_config: PathBuf,
 
     /// The total length of time (in seconds) to wait for a signing request to complete.
@@ -42,27 +57,36 @@ pub struct Config {
     pub request_timeout_secs: NonZeroU64,
 
     /// A list of signing keys available for use.
+    ///
+    /// Each key must be accessible to the Sigul client user in the Sigul
+    /// server. The pesign-client specifies the key it wants to sign its
+    /// request. If the requested key is not in this list, the request is
+    /// rejected.
     pub keys: Vec<Key>,
 }
 
 /// A signing key and certificate pair.
 ///
-/// Each sigul request must specify a signing key to use and a certificate.
-/// Additionally, it must provide a passphrase to use the requested signing key.
+/// When the sigul client requests that a PE be signed, it must specify a
+/// signing key and a certificate to use. Additionally, it must provide a
+/// passphrase to use the requested signing key.
 ///
-/// The service must be configured with a set of [`Key`] it has access to for signing.
-/// If a client specifies a key that is not in the configuration, its request is rejected.
+/// If the pesign-client requests a signature from a [`Key`] that is not in the
+/// [`Config`], its request is rejected.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Key {
-    /// The name of the key in Sigul.
+    /// The name of the key in the Sigul server.
     pub key_name: String,
-    /// The name of the certificate in Sigul.
+    /// The name of the certificate in the Sigul server.
     pub certificate_name: String,
-    /// The ID used in the systemd encrypted credential.
+    /// The systemd credential ID containing the passphrase.
     pub passphrase_path: PathBuf,
-    /// If set, the service will validate the PE has been signed with the given certificate
-    /// before returning the signed file to the client. This validation is done with the
-    /// "sbverify" application, which must be installed to use this option.
+    /// If set, the service will validate the PE has been signed with the given
+    /// certificate before returning the signed file to the client.
+    ///
+    /// This validation is done with the `sbverify` application, which must be
+    /// installed to use this option. This is optional, and if unset, no signature
+    /// validation is performed before passing the result back to the pesign-client.
     pub certificate_file: Option<PathBuf>,
 }
 
@@ -79,6 +103,7 @@ impl Default for Key {
 
 impl Key {
     /// The Sigul passphrase protecting this key.
+    #[doc(hidden)]
     pub fn passphrase(&self) -> Result<String, anyhow::Error> {
         let mut credentials_path = std::env::var("CREDENTIALS_DIRECTORY")
             .map(PathBuf::from)
@@ -101,6 +126,7 @@ impl Config {
     /// Get the absolute path to the Sigul client configuration file.
     ///
     /// The configuration file is expected to be stored relative to the CREDENTIALS_DIRECTORY.
+    #[doc(hidden)]
     pub fn sigul_client_config(&self) -> Result<PathBuf, anyhow::Error> {
         let mut config_path = std::env::var("CREDENTIALS_DIRECTORY")
             .map(PathBuf::from)
@@ -113,6 +139,7 @@ impl Config {
     ///
     /// An error is returned if the files referenced do not exist, or if any of them contain invalid
     /// values.
+    #[doc(hidden)]
     pub fn validate(&self) -> anyhow::Result<()> {
         if self
             .keys

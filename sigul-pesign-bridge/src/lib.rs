@@ -1,6 +1,12 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) Microsoft Corporation.
+
+#![doc = include_str!("../README.md")]
+
+#[doc(hidden)]
 pub mod cli;
-mod config;
+pub mod config;
 mod service;
 
-pub use config::{Config, Key};
+#[doc(hidden)]
 pub use service::listen;
