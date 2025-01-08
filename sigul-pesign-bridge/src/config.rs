@@ -167,8 +167,8 @@ pub(crate) fn load(path: &str) -> anyhow::Result<Config> {
     tracing::info!(%path, "Read from configuration file");
     toml::from_str(&config)
         .inspect_err(|error| {
-            tracing::error!("Failed to parse configuration loaded from {path:?}:\n{error}");
-            tracing::info!("Example config file:\n\n{}", Config::default());
+            eprintln!("Failed to parse configuration loaded from {path:?}:\n{error}");
+            eprintln!("Example config file:\n\n{}", Config::default());
         })
         .context("configuration file is invalid")
 }
