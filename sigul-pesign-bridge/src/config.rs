@@ -26,27 +26,17 @@ pub struct Config {
     ///
     /// This configuration file includes the password to access the NSS database that contains the
     /// client certificate used to authenticate with the Sigul server. As such, it is expected to
-    /// be provided by systemd's "LoadCredentialEncrypted" option.
+    /// be provided by systemd's "ImportCredential" or "LoadCredentialEncrypted" option.
     ///
     /// # Example
     ///
     /// To prepare the encrypted configuration:
     ///
     /// ```bash
-    /// systemd-creds encrypt /secure/ramfs/sigul-client-config /etc/sigul-pesign-bridge/sigul-client-config
+    /// systemd-creds encrypt /secure/ramfs/sigul-client-config /etc/credstore.encrypted/sigul.client.cconfig
     /// ```
     ///
-    /// This will produce an encrypted blob which will be decrypted by systemd at runtime. To
-    /// provide the decrypted secret to the service running under systemd, add the following
-    /// override to the service unit:
-    ///
-    /// ```ini
-    /// [Service]
-    /// LoadCredentialEncrypted=sigul-client-config:/etc/sigul-pesign-bridge/sigul-client-config
-    /// ```
-    ///
-    /// The credentials ID is `sigul-client-config`. The decrypted file is provided to the service
-    /// by systemd using the path `$CREDENTIALS_PATH/sigul-client-config`.
+    /// This will produce an encrypted blob which will be decrypted by systemd at runtime.
     pub sigul_client_config: PathBuf,
 
     /// The total length of time (in seconds) to wait for a signing request to complete.

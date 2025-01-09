@@ -59,10 +59,10 @@ SystemCallFilter=@system-service
 #
 # For the NSS password, sigul uses getpass if it's not in the config file. We can set the password in
 # the configuration file and encrypt the entire thing.
-# $ systemd-creds encrypt /secure/ramfs/sigul-client-config /etc/sigul-pesign-bridge/sigul-client-config
-#LoadCredentialEncrypted=sigul-client-config:/etc/sigul-pesign-bridge/sigul-client-config
-
+# $ systemd-creds encrypt /secure/ramfs/sigul-client-config /etc/credstore.encrypted/sigul.client.config
+#
 # You can use the systemd-creds utility to set up the passphrase file.
 # For example:
 # $ systemd-ask-password -n | systemd-creds encrypt - /etc/sigul-pesign-bridge/sigul-signing-key-passphrase
-#LoadCredentialEncrypted=sigul-signing-key-passphrase:/etc/sigul-pesign-bridge/sigul-signing-key-passphrase
+ImportCredential=sigul.*
+
