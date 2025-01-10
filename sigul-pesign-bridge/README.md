@@ -6,19 +6,32 @@ The service provides a Unix socket at, by default, `/run/pesign/socket`. `pesign
 
 ## Configuration
 
-Configuration is provided via a TOML file. The current configuration (or the default, if none is provided) can be seen with:
+`sigul-pesign-bridge` configuration is provided via a TOML file. The current configuration (or the default, if none is provided) can be seen with:
 ```bash
 sigul-pesign-bridge config
 ```
+
+`sigul-pesign-bridge` relies on the `sigul` client CLI when forwarding requests.
+You must prepare a [sigul client
+configuration](https://pagure.io/sigul/blob/a3c76ae339670a309681c883771172c46409488a/f/config/client.conf)
+for `sigul-pesign-bridge` to use. The `nss` section of this configuration
+includes the path to the NSS database containing the sigul client's TLS
+certificate used for authentication. The database must be readable by the
+`sigul-pesign-bridge` service which runs as the `pesign` user, by default.
+Additionally, the configuration file includes the `nss-password` used to access
+the database, so the configuration file itself should be protected. The
+configuration below includes in-line comments on how to encrypt the file with
+systemd credentials.
 
 The configuration format with in-line documentation:
 
 ```toml
 # The systemd credentials ID of the Sigul client configuration.
 #
-# This configuration file includes the password to access the NSS database that contains the
-# client certificate used to authenticate with the Sigul server. As such, it is expected to
-# be provided by systemd's "ImportCredential" or "LoadCredentialEncrypted" option.
+# The sigul client configuration file includes the password to access the NSS
+# database that contains the client certificate used to authenticate with the
+# Sigul server. As such, it is expected to be provided by systemd's
+# "ImportCredential" or "LoadCredentialEncrypted" option.
 # 
 # # Example
 # 
