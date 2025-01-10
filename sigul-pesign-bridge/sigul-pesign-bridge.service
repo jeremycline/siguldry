@@ -32,6 +32,11 @@ LockPersonality=true
 MemoryDenyWriteExecute=true
 NoNewPrivileges=true
 PrivateDevices=true
+# Credentials may require the TPM to decrypt.
+#
+# Refer to https://github.com/systemd/systemd/issues/35959 as this directive
+# might be removable in the future.
+DeviceAllow=/dev/tpmrm0
 PrivateTmp=true
 ProtectClock=true
 ProtectControlGroups=true
