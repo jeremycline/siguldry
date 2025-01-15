@@ -113,19 +113,16 @@ pub fn listen(
 
 /// Process a single client request.
 ///
-/// All requests are wrapped in a timeout derived from the configured request timeout.
-/// A few extra seconds are granted the request as each request is made up of several
-/// request/response pairs and each of those are guarded by a timeout.
+/// All requests are wrapped in a timeout to ensure they don't get stuck forever.
+/// This timeout is configurable via [`Config::request_timeout_secs`].
 #[instrument(skip_all, ret, fields(request_id = uuid::Uuid::now_v7().to_string()))]
 async fn request(
     runtime_directory: PathBuf,
     config: Config,
     unix_stream: UnixStream,
 ) -> Result<(), anyhow::Error> {
-    // Requests to Sigul are guarded by a timeout, we'll grant 10 extra seconds before shutting
-    // down the whole request. This is necessary for cases when the client doesn't behave as expected.
     let result = tokio::time::timeout(
-        Duration::from_secs(config.request_timeout_secs.get() + 10),
+        Duration::from_secs(config.request_timeout_secs.get()),
         request_handler(runtime_directory, config, unix_stream),
     )
     .await;
@@ -430,7 +427,8 @@ async fn sign_attached_with_filetype(
 
     let sigul_client_config = config.sigul_client_config()?;
     tokio::time::timeout(
-        Duration::from_secs(config.request_timeout_secs.get() + 10),
+        // Grant the service 500 milliseconds to send the final "we failed message"
+        Duration::from_secs_f64(config.request_timeout_secs.get() as f64 - 0.5),
         async {
             while let Err(error) =
                 forward_pe_file(&sigul_client_config, key, &sigul_input, &sigul_output).await
@@ -521,7 +519,7 @@ async fn forward_pe_file(
         .stdout(Stdio::piped());
     tracing::debug!(?command, "Issuing signing request via sigul client");
     let mut child = command.spawn()?;
-    let result = tokio::time::timeout(Duration::from_secs(30), async {
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
         if let Some(stdin) = &mut child.stdin {
             stdin.write_all(passphrase.as_bytes()).await?;
             tracing::debug!("Wrote Sigul key passphrase to child's stdin");
@@ -543,9 +541,9 @@ async fn forward_pe_file(
 
 #[cfg(test)]
 mod tests {
-    use std::io;
     use std::sync::Once;
     use std::time::Duration;
+    use std::{io, num::NonZeroU64};
 
     use anyhow::{anyhow, Result};
     use bytes::{BufMut, Bytes, BytesMut};
@@ -683,6 +681,53 @@ mod tests {
         assert!(logs_contain(
             "Waiting for pending requests to complete pending_requests=1"
         ));
+
+        Ok(())
+    }
+
+    // Test that a request is killed by the server when the configured timeout is hit.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn requests_time_out() -> Result<()> {
+        set_umask();
+        let socket_dir = tempfile::tempdir()?;
+        let socket_path = socket_dir.path().join("socket");
+        let config = Config {
+            request_timeout_secs: NonZeroU64::new(1).unwrap(),
+            ..Default::default()
+        };
+        let cancel_token = CancellationToken::new();
+
+        let server_task = super::listen(
+            socket_dir.path().to_owned(),
+            config.clone(),
+            cancel_token.clone(),
+        )?;
+
+        let client_task = tokio::spawn(async move {
+            // Do absolutely nothing at all until the timeout is hit.
+            let mut conn = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+            tokio::time::sleep(Duration::from_secs_f64(1.1)).await;
+
+            let mut buf = BytesMut::new();
+            let header: Bytes = Header {
+                command: Command::GetCmdVersion,
+                payload_length: std::mem::size_of::<u32>(),
+            }
+            .try_into()
+            .unwrap();
+            buf.put_slice(header.as_bytes());
+            buf.put_u32_ne(Command::GetCmdVersion.into());
+            if conn.write_all_buf(&mut buf).await.is_ok() {
+                panic!("The server should have hung up on us.")
+            }
+            cancel_token.cancel();
+        });
+
+        server_task.await??;
+        client_task.await?;
+
+        assert!(logs_contain("Request handler timed out!"));
 
         Ok(())
     }
