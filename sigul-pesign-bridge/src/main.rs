@@ -33,31 +33,27 @@ async fn main() -> Result<(), anyhow::Error> {
     tokio::spawn(signal_handler(halt_token.clone()));
 
     match opts.command {
-        cli::Command::Listen { runtime_directory } => {
-            // if multiple runtime directories were provided, we don't know which to use so panic for now.
-            if runtime_directory
-                .to_str()
-                .ok_or(anyhow::anyhow!(
-                    "runtime_directory must be valid unicode characters"
-                ))?
-                .contains(':')
-            {
-                return Err(anyhow::anyhow!(
-                    "Multiple RuntimeDirectories are not supported"
-                ));
-            }
+        cli::Command::Listen {
+            runtime_directory,
+            credentials_directory,
+        } => {
             let config = opts.config.unwrap_or_default();
-            config.validate().context(
+            config.validate(Some(&credentials_directory)).context(
                 "configuration format is correct, but references files that are missing or invalid",
             )?;
+            let context = sigul_pesign_bridge::Context::new(
+                config,
+                runtime_directory,
+                credentials_directory,
+            )?;
 
-            listen(runtime_directory, config, halt_token)?.await?
+            listen(context, halt_token)?.await?
         }
         cli::Command::Config => {
             let config = opts.config.unwrap_or_default();
             println!("Current configuration:\n\n{}", config);
-            config.validate().inspect_err(|err|{
-                eprintln!("The configuration format is correct, but references files that are missing or invalid: {}", err);
+            config.validate(None).inspect_err(|err|{
+                eprintln!("The configuration format is correct, but contain options which may be invalid: {}", err);
             })
         }
     }

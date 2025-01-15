@@ -17,12 +17,12 @@ use std::{
         fd::{AsFd, AsRawFd, FromRawFd, RawFd},
         unix::fs::PermissionsExt,
     },
-    path::{Path, PathBuf},
+    path::Path,
     process::Stdio,
     time::Duration,
 };
 
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, Context as AnyhowContext};
 use bytes::Bytes;
 use nix::{
     cmsg_space,
@@ -40,7 +40,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{instrument, Instrument};
 
 use crate::{
-    config::{Config, Key},
+    config::Key,
     pesign::{self, Command, Header, Response, SignAttachedRequest},
 };
 
@@ -56,11 +56,10 @@ use crate::{
 #[doc(hidden)]
 #[instrument(err, skip_all)]
 pub fn listen(
-    runtime_directory: PathBuf,
-    config: Config,
+    context: super::Context,
     halt_token: CancellationToken,
 ) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
-    let socket_path = runtime_directory.join("socket");
+    let socket_path = context.runtime_directory.join("socket");
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("Failed to bind to {}", &socket_path.display()))?;
     let metadata = std::fs::metadata(&socket_path)?;
@@ -85,7 +84,7 @@ pub fn listen(
                 result = listener.accept() => {
                     match result {
                         Ok((unix_stream, _)) => {
-                            request_tracker.spawn(request(runtime_directory.clone(), config.clone(), unix_stream).instrument(tracing::Span::current()));
+                            request_tracker.spawn(request(context.clone(), unix_stream).instrument(tracing::Span::current()));
                         },
                         Err(error) => {
                             tracing::error!(socket=?socket_path, ?error, "Failed to accept request");
@@ -116,14 +115,10 @@ pub fn listen(
 /// All requests are wrapped in a timeout to ensure they don't get stuck forever.
 /// This timeout is configurable via [`Config::request_timeout_secs`].
 #[instrument(skip_all, ret, fields(request_id = uuid::Uuid::now_v7().to_string()))]
-async fn request(
-    runtime_directory: PathBuf,
-    config: Config,
-    unix_stream: UnixStream,
-) -> Result<(), anyhow::Error> {
+async fn request(context: super::Context, unix_stream: UnixStream) -> Result<(), anyhow::Error> {
     let result = tokio::time::timeout(
-        Duration::from_secs(config.request_timeout_secs.get()),
-        request_handler(runtime_directory, config, unix_stream),
+        Duration::from_secs(context.config.request_timeout_secs.get()),
+        request_handler(context, unix_stream),
     )
     .await;
     if result.is_err() {
@@ -134,8 +129,7 @@ async fn request(
 }
 
 async fn request_handler(
-    runtime_directory: PathBuf,
-    config: Config,
+    context: super::Context,
     mut unix_stream: UnixStream,
 ) -> Result<(), anyhow::Error> {
     loop {
@@ -152,8 +146,7 @@ async fn request_handler(
                     }
                     Command::SignAttachedWithFileType => {
                         let result = sign_attached_with_filetype(
-                            &runtime_directory,
-                            &config,
+                            &context,
                             &mut unix_stream,
                             request.payload_length,
                         )
@@ -382,8 +375,7 @@ fn convert_cmsgs_to_files(cmsgs: Vec<ControlMessageOwned>) -> anyhow::Result<Pes
 /// respond to the client request with a failure.
 #[instrument(skip_all, ret)]
 async fn sign_attached_with_filetype(
-    runtime_directory: &Path,
-    config: &Config,
+    context: &super::Context,
     connection: &mut UnixStream,
     payload_length: usize,
 ) -> Result<(), anyhow::Error> {
@@ -394,17 +386,17 @@ async fn sign_attached_with_filetype(
     let request = SignAttachedRequest::try_from(payload.as_slice())?;
     tracing::info!(?request.token_name, ?request.certificate_name, "Client signing request received");
 
-    let key = request.key(&config.keys)?;
+    let key = request.key(&context.config.keys)?;
     let mut pesign_files = get_files_from_conn(connection).await?;
 
     let temp_dir = tempfile::Builder::new()
         .prefix(".work")
         .rand_bytes(16)
-        .tempdir_in(runtime_directory)
+        .tempdir_in(&context.runtime_directory)
         .inspect_err(|error| {
             tracing::error!(
                 ?error,
-                ?runtime_directory,
+                ?context.runtime_directory,
                 "Failed to make temporary directory inside the runtime directory"
             );
         })?;
@@ -425,13 +417,11 @@ async fn sign_attached_with_filetype(
         Ok::<_, anyhow::Error>(sigul_input)
     }).await??;
 
-    let sigul_client_config = config.sigul_client_config()?;
     tokio::time::timeout(
         // Grant the service 500 milliseconds to send the final "we failed message"
-        Duration::from_secs_f64(config.request_timeout_secs.get() as f64 - 0.5),
+        Duration::from_secs_f64(context.config.request_timeout_secs.get() as f64 - 0.5),
         async {
-            while let Err(error) =
-                forward_pe_file(&sigul_client_config, key, &sigul_input, &sigul_output).await
+            while let Err(error) = forward_pe_file(context, key, &sigul_input, &sigul_output).await
             {
                 tracing::warn!(%error, "signing failed; retrying sigul client in 2 seconds");
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -492,12 +482,15 @@ async fn sign_attached_with_filetype(
 
 #[instrument(skip_all, ret)]
 async fn forward_pe_file(
-    sigul_client_config: &Path,
+    context: &super::Context,
     key: &Key,
     input: &Path,
     output: &Path,
 ) -> anyhow::Result<()> {
-    let passphrase = key.passphrase()?;
+    let sigul_client_config = context
+        .config
+        .sigul_client_config(&context.credentials_directory);
+    let passphrase = key.passphrase(&context.credentials_directory)?;
 
     let mut command = tokio::process::Command::new("sigul");
     command
@@ -552,6 +545,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use zerocopy::IntoBytes;
 
+    use crate::Context;
     use crate::{config::Config, pesign::Header};
 
     use super::Command;
@@ -572,11 +566,14 @@ mod tests {
         set_umask();
         let socket_dir = tempfile::tempdir()?;
         let socket_path = socket_dir.path().join("socket");
-        let config = Config::default();
+        let context = Context::new(
+            Config::default(),
+            socket_dir.path().to_path_buf(),
+            socket_dir.path().to_path_buf(),
+        )?;
         let cancel_token = CancellationToken::new();
 
-        let server_task =
-            super::listen(socket_dir.path().to_owned(), config, cancel_token.clone())?;
+        let server_task = super::listen(context, cancel_token.clone())?;
 
         let _ = std::fs::metadata(&socket_path)?;
         cancel_token.cancel();
@@ -596,11 +593,14 @@ mod tests {
         set_umask();
         let socket_dir = tempfile::tempdir()?;
         let socket_path = socket_dir.path().join("socket");
-        let config = Config::default();
+        let context = Context::new(
+            Config::default(),
+            socket_dir.path().to_path_buf(),
+            socket_dir.path().to_path_buf(),
+        )?;
         let cancel_token = CancellationToken::new();
 
-        let server_task =
-            super::listen(socket_dir.path().to_owned(), config, cancel_token.clone())?;
+        let server_task = super::listen(context, cancel_token.clone())?;
         let client_task = tokio::spawn(async move {
             let mut conn = tokio::net::UnixStream::connect(socket_path).await.unwrap();
 
@@ -637,14 +637,14 @@ mod tests {
         set_umask();
         let socket_dir = tempfile::tempdir()?;
         let socket_path = socket_dir.path().join("socket");
-        let config = Config::default();
+        let context = Context::new(
+            Config::default(),
+            socket_dir.path().to_path_buf(),
+            socket_dir.path().to_path_buf(),
+        )?;
         let cancel_token = CancellationToken::new();
 
-        let server_task = super::listen(
-            socket_dir.path().to_owned(),
-            config.clone(),
-            cancel_token.clone(),
-        )?;
+        let server_task = super::listen(context, cancel_token.clone())?;
 
         let client_task = tokio::spawn(async move {
             let mut conn = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
@@ -696,13 +696,14 @@ mod tests {
             request_timeout_secs: NonZeroU64::new(1).unwrap(),
             ..Default::default()
         };
+        let context = Context::new(
+            config,
+            socket_dir.path().to_path_buf(),
+            socket_dir.path().to_path_buf(),
+        )?;
         let cancel_token = CancellationToken::new();
 
-        let server_task = super::listen(
-            socket_dir.path().to_owned(),
-            config.clone(),
-            cancel_token.clone(),
-        )?;
+        let server_task = super::listen(context, cancel_token.clone())?;
 
         let client_task = tokio::spawn(async move {
             // Do absolutely nothing at all until the timeout is hit.

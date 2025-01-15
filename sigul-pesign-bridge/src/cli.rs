@@ -64,8 +64,20 @@ pub enum Command {
         ///
         /// When run under systemd, providing a `RuntimeDirectory=` directive will
         /// set the environment variable automatically for you.
-        #[arg(long, short, env = "RUNTIME_DIRECTORY")]
+        #[arg(long, env = "RUNTIME_DIRECTORY")]
         runtime_directory: PathBuf,
+
+        /// The directory containing the service's secrets.
+        ///
+        /// The `sigul_client_config` setting in the configuration file is expected
+        /// to be relative to this directory, as are the `passphrase_path` settings
+        /// for each configured `key`.
+        ///
+        /// When run under systemd, providing a `ImportCredential=`,
+        /// `LoadCredentialEncrypted=`, or `LoadCredential=` directive will
+        /// set the environment variable automatically for you.
+        #[arg(long, env = "CREDENTIALS_DIRECTORY")]
+        credentials_directory: PathBuf,
     },
     /// Print the current service configuration to standard output.
     ///

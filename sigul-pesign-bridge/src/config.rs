@@ -94,11 +94,11 @@ impl Default for Key {
 impl Key {
     /// The Sigul passphrase protecting this key.
     #[doc(hidden)]
-    pub fn passphrase(&self) -> Result<String, anyhow::Error> {
-        let mut credentials_path = std::env::var("CREDENTIALS_DIRECTORY")
-            .map(PathBuf::from)
-            .context("You (or systemd) must set the CREDENTIALS_DIRECTORY environment variable")?;
-        credentials_path.push(&self.passphrase_path);
+    pub fn passphrase(
+        &self,
+        credentials_directory: &std::path::Path,
+    ) -> Result<String, anyhow::Error> {
+        let credentials_path = credentials_directory.join(&self.passphrase_path);
         let mut passphrase = std::fs::read_to_string(credentials_path)?;
         if passphrase.contains('\n') {
             return Err(anyhow!(
@@ -117,12 +117,8 @@ impl Config {
     ///
     /// The configuration file is expected to be stored relative to the CREDENTIALS_DIRECTORY.
     #[doc(hidden)]
-    pub fn sigul_client_config(&self) -> Result<PathBuf, anyhow::Error> {
-        let mut config_path = std::env::var("CREDENTIALS_DIRECTORY")
-            .map(PathBuf::from)
-            .context("You (or systemd) must set the CREDENTIALS_DIRECTORY environment variable")?;
-        config_path.push(&self.sigul_client_config);
-        Ok(config_path)
+    pub fn sigul_client_config(&self, credentials_dir: &std::path::Path) -> PathBuf {
+        credentials_dir.join(&self.sigul_client_config)
     }
 
     /// Check the configuration file for validity.
@@ -130,16 +126,22 @@ impl Config {
     /// An error is returned if the files referenced do not exist, or if any of them contain invalid
     /// values.
     #[doc(hidden)]
-    pub fn validate(&self) -> anyhow::Result<()> {
-        if self
-            .keys
-            .iter()
-            .map(|k| k.passphrase().err().inspect(|e| tracing::error!(error=%e)))
-            .any(|err| err.is_some())
-        {
-            return Err(anyhow!(
-                "One or more passphrase files are missing or contain newlines"
-            ));
+    pub fn validate(&self, credentials_dir: Option<&std::path::Path>) -> anyhow::Result<()> {
+        if let Some(dir) = credentials_dir {
+            if self
+                .keys
+                .iter()
+                .map(|k| {
+                    k.passphrase(dir)
+                        .err()
+                        .inspect(|e| tracing::error!(error=%e))
+                })
+                .any(|err| err.is_some())
+            {
+                return Err(anyhow!(
+                    "One or more passphrase files are missing or contain newlines"
+                ));
+            }
         }
 
         if self.keys.iter().any(|key| key.certificate_file.is_some()) {
