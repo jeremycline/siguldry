@@ -26,6 +26,18 @@ pub struct Cli {
     /// defaults, run the `config` subcommand.
     #[arg(long, short, env = "SIGUL_PESIGN_BRIDGE_CONFIG", value_parser = config::load)]
     pub config: Option<Config>,
+    /// A set of one or more comma-separated directives to filter logs.
+    ///
+    /// The general format is "target_name[span_name{field=value}]=level" where level is
+    /// one of TRACE, DEBUG, INFO, WARN, ERROR.
+    ///
+    /// Details: https://docs.rs/tracing-subscriber/0.3.19/tracing_subscriber/filter/struct.EnvFilter.html#directives
+    #[arg(
+        long,
+        env = "SIGUL_PESIGN_BRIDGE_LOG",
+        default_value = "WARN,sigul_pesign_bridge=INFO"
+    )]
+    pub log_filter: String,
     #[command(subcommand)]
     pub command: Command,
 }

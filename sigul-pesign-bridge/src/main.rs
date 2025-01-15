@@ -5,7 +5,6 @@ use anyhow::Context;
 use clap::Parser;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio_util::sync::CancellationToken;
-use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, EnvFilter};
 
 use sigul_pesign_bridge::{cli, listen};
@@ -14,15 +13,13 @@ use sigul_pesign_bridge::{cli, listen};
 async fn main() -> Result<(), anyhow::Error> {
     let opts = cli::Cli::parse();
 
-    let log_filter = EnvFilter::builder()
-        .with_env_var("SIGUL_PESIGN_BRIDGE_LOG")
-        .with_default_directive(LevelFilter::INFO.into())
-        .from_env()
-        .context(
-            "SIGUL_PESIGN_BRIDGE_LOG contains an invalid log directive; refer to \
+    // Unfortunately we can't use clap's value_parser since EnvFilter does not
+    // implement Clone.
+    let log_filter = EnvFilter::builder().parse(opts.log_filter).context(
+        "SIGUL_PESIGN_BRIDGE_LOG contains an invalid log directive; refer to \
             https://docs.rs/tracing-subscriber/0.3.19/tracing_subscriber/\
             filter/struct.EnvFilter.html#directives for format details.",
-        )?;
+    )?;
     let stderr_layer = tracing_subscriber::fmt::layer()
         .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
         .with_writer(std::io::stderr);
