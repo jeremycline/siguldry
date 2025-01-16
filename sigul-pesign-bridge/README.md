@@ -2,6 +2,20 @@
 
 Drop-in replacement for pesign's daemon that bridges pesign-client requests to a Sigul server.
 
+[![Crates.io][crates-badge]][crates-url]
+[![Documentation][docs-badge]][docs-url]
+[![MIT licensed][mit-badge]][mit-url]
+[![Build Status][actions-badge]][actions-url]
+
+[crates-badge]: https://img.shields.io/crates/v/sigul-pesign-bridge.svg
+[crates-url]: https://crates.io/crates/sigul-pesign-bridge
+[docs-badge]: https://docs.rs/sigul-pesign-bridge/badge.svg
+[docs-url]: https://docs.rs/sigul-pesign-bridge
+[mit-badge]: https://img.shields.io/badge/license-MIT-blue.svg
+[mit-url]: LICENSE
+[actions-badge]: https://github.com/jeremycline/siguldry/workflows/CI/badge.svg
+[actions-url]:https://github.com/jeremycline/siguldry/actions?query=workflow%3ACI
+
 The service provides a Unix socket at, by default, `/run/pesign/socket`. `pesign-client` can be used to connect to this socket and request signatures for PE applications. Unlike `pesign`, this implementation forwards the request to a [sigul](https://pagure.io/sigul) signing server.
 
 ## Configuration
