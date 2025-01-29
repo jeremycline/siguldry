@@ -47,18 +47,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Install stable Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        id: rust-toolchain
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Install the latest version of uv
+        uses: astral-sh/setup-uv@v5
 
-      - name: Install zizmor
-        run: |
-          cargo install zizmor
-
-      - name: zizmor - GitHub actions audit
-        run: zizmor .
+      - name: Run zizmor 🌈
+        run: uvx zizmor .
 
   test:
     name: Unit tests
