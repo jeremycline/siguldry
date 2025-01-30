@@ -34,7 +34,10 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn generate_manual() -> anyhow::Result<()> {
-    let outdir = PathBuf::from(env::var_os("OUT_DIR").ok_or(anyhow!("Must set OUT_DIR"))?);
+    let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    root.push("../");
+
+    let outdir = root.join("sigul-pesign-bridge/docs/");
     let command = sigul_pesign_bridge::cli::Cli::command();
     let manual = clap_mangen::Man::new(command);
     manual.generate_to(outdir)?;
