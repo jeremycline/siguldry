@@ -15,7 +15,7 @@ A few dependencies from your distribution are also required. This is expected to
 although it may work elsewhere:
 
 ```bash
-sudo dnf install pesign sigul sbsigntools
+sudo dnf install pesign sbsigntools openssl-devel
 ```
 
 Additionally, the CI is easiest to run with containers for the Sigul bridge and server:
@@ -27,48 +27,24 @@ sudo dnf install podman podman-compose
 ### Integration Tests
 
 The integration tests use the Sigul server and Sigul bridge which can be tricky to set up. Fortunately,
-there's a container image (built from `devel/Containerfile.sigul`) to make things easier.
-
-#### One-time Setup
-
-There's some one-time setup required to allow you to run the integration tests outside
-a container. A CI container is available with the TLS certificates baked in (for
-**TESTING** *ONLY*). These include the Sigul client certificate. To extract them:
-
-```bash
-# This needs to be done whenever the CI container changes or the checked-in
-# sigul client configuration changes.
-mkdir ~/.sigul
-cp devel/local/client.conf ~/.sigul/client.conf
-podman pull quay.io/jeremycline/sigul-pesign-bridge-ci:latest && \
-    podman run --name sigul-key-extract quay.io/jeremycline/sigul-pesign-bridge-ci:latest && \
-    podman cp sigul-key-extract:/var/lib/sigul/ ~/.sigul && \
-    podman rm sigul-key-extract
-```
-
-We also need to set up a directory to match the layout of the secrets directory systemd
-provides the service:
-```bash
-# Set up a fake credentials directory like systemd. The signing password is set in
-# the sigul_key_setup.sh script and must match.
-mkdir creds/
-echo "my-signing-password" > creds/sigul-signing-key-passphrase
-cp devel/local/client.conf creds/sigul-client-config
-```
+there's a container image (built from `devel/Containerfile.sigul`) to make things easier. TLS certificates
+for authenticating with the service as well as signing PE files are baked into the image. For convenience,
+these are also checked into the repository at `devel/creds/` by running `cargo xtask extract-keys` whenever
+a new image is built.
 
 #### Running tests
 
 Start the Sigul server and bridge by running the following from the repository root:
 
 ```bash
-# Start the service and create signing keys. The signing keys
-# must be recreated whenever the compose is destroyed.
+# Start the services
 podman compose up -d
-./devel/sigul_key_setup.sh
 ```
 
+Now we can run the tests:
+
 ```bash
-SIGUL_PESIGN_BRIDGE_LOG=trace CREDENTIALS_DIRECTORY=$(pwd)/creds/ cargo test
+cargo test
 ```
 
 ## Licensing

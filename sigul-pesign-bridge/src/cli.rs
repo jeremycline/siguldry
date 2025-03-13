@@ -35,7 +35,7 @@ pub struct Cli {
     #[arg(
         long,
         env = "SIGUL_PESIGN_BRIDGE_LOG",
-        default_value = "WARN,sigul_pesign_bridge=INFO"
+        default_value = "WARN,sigul_pesign_bridge=INFO,siguldry=INFO"
     )]
     pub log_filter: String,
     #[command(subcommand)]
@@ -69,9 +69,10 @@ pub enum Command {
 
         /// The directory containing the service's secrets.
         ///
-        /// The `sigul_client_config` setting in the configuration file is expected
-        /// to be relative to this directory, as are the `passphrase_path` settings
-        /// for each configured `key`.
+        /// Any file referenced in the configuration that are not absolute paths are
+        /// expected to be in this directory. Examples include the `passphrase_path`
+        /// setting for each configured `key`, the `private_key` setting in the `sigul`
+        /// section, etc.
         ///
         /// When run under systemd, providing a `ImportCredential=`,
         /// `LoadCredentialEncrypted=`, or `LoadCredential=` directive will
@@ -83,5 +84,22 @@ pub enum Command {
     ///
     /// If no config file is provided, the defaults are printed. For complete
     /// details on each configuration option, refer to the the documentation.
-    Config,
+    Config {
+        /// The directory containing the service's secrets.
+        ///
+        /// Any file referenced in the configuration that are not absolute paths are
+        /// expected to be in this directory. Examples include the `passphrase_path`
+        /// setting for each configured `key`, the `private_key` setting in the `sigul`
+        /// section, etc.
+        ///
+        /// When run under systemd, providing a `ImportCredential=`,
+        /// `LoadCredentialEncrypted=`, or `LoadCredential=` directive will
+        /// set the environment variable automatically for you.
+        #[arg(
+            long,
+            env = "CREDENTIALS_DIRECTORY",
+            default_value = "/etc/credstore.encrypted/"
+        )]
+        credentials_directory: PathBuf,
+    },
 }

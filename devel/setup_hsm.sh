@@ -17,6 +17,9 @@ HSM_PIN="abc123def"
 HSM_SO_PIN="fed321cba"
 TOKEN_LABEL="Sigul Token 0"
 
+mkdir -p creds/
+pushd creds
+
 # Initialize a token slot in softhsm
 softhsm2-util \
 	--init-token --slot 0 --label "$TOKEN_LABEL" \
@@ -73,9 +76,14 @@ pkcs11-tool --module /usr/lib64/softhsm/libsofthsm.so \
 # The sigul user needs to be able to own the token
 chown -R sigul:sigul /var/lib/softhsm/
 
-echo "my-signing-password" > passphrase_file
+echo "my-signing-password" > sigul.signing-key-passphrase
 /usr/share/sigul/server_add_pkcs11_token.py --initial-key-admin sigul-client \
 	--key-uri "${SIGNING_KEY_URI}" \
 	--key-name "Sigul HSM Key" \
 	--token-pin-file ./hsm_pin \
-	--passphrase-file ./passphrase_file
+	--passphrase-file ./sigul.signing-key-passphrase
+
+rm ./*.csr
+rm ./hsm_pin
+rm ./openssl.cnf
+popd

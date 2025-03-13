@@ -17,8 +17,6 @@ use std::{
         fd::{AsFd, AsRawFd, FromRawFd, RawFd},
         unix::fs::PermissionsExt,
     },
-    path::Path,
-    process::Stdio,
     time::Duration,
 };
 
@@ -31,6 +29,7 @@ use nix::{
         stat::Mode,
     },
 };
+use siguldry::error::ClientError;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
@@ -39,10 +38,7 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{instrument, Instrument};
 
-use crate::{
-    config::Key,
-    pesign::{self, Command, Header, Response, SignAttachedRequest},
-};
+use crate::pesign::{self, Command, Header, Response, SignAttachedRequest};
 
 /// Listen on a Unix socket on the given path.
 ///
@@ -421,15 +417,43 @@ async fn sign_attached_with_filetype(
         // Grant the service 500 milliseconds to send the final "we failed message"
         Duration::from_secs_f64(context.config.request_timeout_secs.get() as f64 - 0.5),
         async {
-            while let Err(error) = forward_pe_file(context, key, &sigul_input, &sigul_output).await
-            {
-                tracing::warn!(%error, "signing failed; retrying sigul client in 2 seconds");
-                tokio::time::sleep(Duration::from_secs(2)).await;
+            loop {
+                let input_stream = tokio::fs::File::open(&sigul_input)
+                    .await
+                    .with_context(|| format!("failed to read input file '{}'", &sigul_input.display()))?;
+                let output_stream = tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .create(true)
+                    .open(&sigul_output)
+                    .await
+                    .with_context(|| format!("failed to open output file '{}'", &sigul_output.display()))?;
+
+                match context
+                    .sigul_client
+                    .sign_pe(
+                        input_stream,
+                        output_stream,
+                        key.passphrase_path.as_path().try_into()?,
+                        key.key_name.clone(),
+                        key.certificate_name.clone(),
+                    )
+                    .await {
+                    Ok(_) => break Ok::<_, anyhow::Error>(()),
+                    Err(ClientError::Connection(error)) => {
+                        tracing::warn!(%error, "signing failed; retrying sigul client in 2 seconds");
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "signing failed due to an unrecoverable error");
+                        return Err(error.into());
+                    },
+                }
             }
         },
     )
     .await
-    .context("Timeout reached while waiting for Sigul")?;
+    .context("Timeout reached while waiting for Sigul")?.context("Signing via sigual was unsuccessful")?;
 
     if let Some(signing_cert) = &key.certificate_file {
         tracing::info!("Certificate file is provided for this key; validating with 'sbverify'");
@@ -480,58 +504,6 @@ async fn sign_attached_with_filetype(
     Ok(())
 }
 
-#[instrument(skip_all, ret)]
-async fn forward_pe_file(
-    context: &super::Context,
-    key: &Key,
-    input: &Path,
-    output: &Path,
-) -> anyhow::Result<()> {
-    let sigul_client_config = context
-        .config
-        .sigul_client_config(&context.credentials_directory);
-    let passphrase = key.passphrase(&context.credentials_directory)?;
-
-    let mut command = tokio::process::Command::new("sigul");
-    command
-        .args([
-            "-v",
-            "-v",
-            "--batch",
-            format!("--config-file={}", sigul_client_config.display()).as_str(),
-            "sign-pe",
-            "--output",
-            output.to_str().unwrap(),
-            &key.key_name,
-            &key.certificate_name,
-            input.to_str().unwrap(),
-        ])
-        .kill_on_drop(true)
-        .stdin(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdout(Stdio::piped());
-    tracing::debug!(?command, "Issuing signing request via sigul client");
-    let mut child = command.spawn()?;
-    let result = tokio::time::timeout(Duration::from_secs(5), async {
-        if let Some(stdin) = &mut child.stdin {
-            stdin.write_all(passphrase.as_bytes()).await?;
-            tracing::debug!("Wrote Sigul key passphrase to child's stdin");
-        }
-        child.wait_with_output().await
-    })
-    .await??;
-
-    let stderr = String::from_utf8_lossy(&result.stderr);
-    let stdout = String::from_utf8_lossy(&result.stdout);
-    if result.status.success() {
-        tracing::debug!(?command, status=?result.status, ?stderr, ?stdout, "sigul client completed successfully");
-        Ok(())
-    } else {
-        tracing::warn!(?command, status=?result.status, ?stderr, ?stdout, "sigul client failed");
-        Err(anyhow!("sigul client failed"))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Once;
@@ -566,11 +538,7 @@ mod tests {
         set_umask();
         let socket_dir = tempfile::tempdir()?;
         let socket_path = socket_dir.path().join("socket");
-        let context = Context::new(
-            Config::default(),
-            socket_dir.path().to_path_buf(),
-            socket_dir.path().to_path_buf(),
-        )?;
+        let context = Context::new(config(), socket_dir.path().to_path_buf())?;
         let cancel_token = CancellationToken::new();
 
         let server_task = super::listen(context, cancel_token.clone())?;
@@ -593,11 +561,7 @@ mod tests {
         set_umask();
         let socket_dir = tempfile::tempdir()?;
         let socket_path = socket_dir.path().join("socket");
-        let context = Context::new(
-            Config::default(),
-            socket_dir.path().to_path_buf(),
-            socket_dir.path().to_path_buf(),
-        )?;
+        let context = Context::new(config(), socket_dir.path().to_path_buf())?;
         let cancel_token = CancellationToken::new();
 
         let server_task = super::listen(context, cancel_token.clone())?;
@@ -629,6 +593,16 @@ mod tests {
         Ok(())
     }
 
+    fn config() -> Config {
+        let mut config = Config::default();
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let outdir = root.join("../devel/creds");
+        config
+            .fix_credentials(&outdir)
+            .expect("extract CI credentials with 'cargo xtask extract-keys'");
+        config
+    }
+
     // Test that the service waits for existing requests to complete (or timeout) after it
     // receives a signal to terminate.
     #[tokio::test]
@@ -637,11 +611,7 @@ mod tests {
         set_umask();
         let socket_dir = tempfile::tempdir()?;
         let socket_path = socket_dir.path().join("socket");
-        let context = Context::new(
-            Config::default(),
-            socket_dir.path().to_path_buf(),
-            socket_dir.path().to_path_buf(),
-        )?;
+        let context = Context::new(config(), socket_dir.path().to_path_buf())?;
         let cancel_token = CancellationToken::new();
 
         let server_task = super::listen(context, cancel_token.clone())?;
@@ -692,15 +662,9 @@ mod tests {
         set_umask();
         let socket_dir = tempfile::tempdir()?;
         let socket_path = socket_dir.path().join("socket");
-        let config = Config {
-            request_timeout_secs: NonZeroU64::new(1).unwrap(),
-            ..Default::default()
-        };
-        let context = Context::new(
-            config,
-            socket_dir.path().to_path_buf(),
-            socket_dir.path().to_path_buf(),
-        )?;
+        let mut config = config();
+        config.request_timeout_secs = NonZeroU64::new(1).unwrap();
+        let context = Context::new(config, socket_dir.path().to_path_buf())?;
         let cancel_token = CancellationToken::new();
 
         let server_task = super::listen(context, cancel_token.clone())?;

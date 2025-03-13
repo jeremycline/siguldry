@@ -1,0 +1,20 @@
+request_timeout_secs = 30
+
+[sigul]
+bridge_hostname = "sigul-bridge"
+bridge_port = 44334
+server_hostname = "sigul-server"
+sigul_user_name = "sigul-client"
+private_key = "sigul.client.private_key.pem"
+client_certificate = "sigul.client.certificate.pem"
+ca_certificate = "sigul.ca_certificate.pem"
+
+[[keys]]
+key_name = "Sigul HSM Key"
+certificate_name = "Secure Boot Code Signing Certificate"
+passphrase_path = "sigul.signing-key-passphrase"
+
+[[keys]]
+key_name = "bad key"
+certificate_name = "bad cert"
+passphrase_path = "sigul.signing-key-passphrase"

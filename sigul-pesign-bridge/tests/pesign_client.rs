@@ -45,35 +45,28 @@ fn run_command(mut client_command: Command) -> Result<(Output, Output)> {
             "{socket_path} exists; unable to start test instance"
         ));
     };
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../")
+        .canonicalize()?;
+    let creds_directory = repo_root.join("devel/creds/");
 
-    let mut signing_cert = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    signing_cert.push("../keys/secure-boot-code-signing-cert.pem");
-    let mut config_file = tempfile::NamedTempFile::new()?;
-    let config = format!(
-        "
-    sigul_client_config = \"sigul-client-config\"
-    request_timeout_secs = 30
-
-    [[keys]]
-    key_name = \"Sigul HSM Key\"
-    certificate_name = \"Secure Boot Code Signing Certificate\"
-    passphrase_path = \"sigul-signing-key-passphrase\"
-    certificate_file = \"{}\"
-    ",
-        signing_cert.display()
-    );
-    config_file.write_all(config.as_bytes()).unwrap();
-    config_file.flush().unwrap();
+    let config_file = if std::env::var("GITHUB_ACTIONS").is_ok_and(|val| val.contains("true")) {
+        repo_root.join("devel/github/config.toml")
+    } else {
+        repo_root.join("devel/local/config.toml")
+    };
 
     let mut server_command = Command::cargo_bin("sigul-pesign-bridge")?;
     server_command
         .env("RUNTIME_DIRECTORY", working_dir)
+        .env("CREDENTIALS_DIRECTORY", creds_directory)
         .env("SIGUL_PESIGN_BRIDGE_LOG", "trace")
-        .env("SIGUL_PESIGN_BRIDGE_CONFIG", config_file.path())
+        .env("SIGUL_PESIGN_BRIDGE_CONFIG", config_file)
         .arg("listen")
         .stderr(Stdio::piped())
         .stdout(Stdio::piped());
     let mut service = server_command.spawn()?;
+    let service_id = service.id().try_into()?;
 
     let mut tries = 0;
     while let Err(error) = std::fs::metadata(socket_path) {
@@ -91,6 +84,8 @@ fn run_command(mut client_command: Command) -> Result<(Output, Output)> {
             return Err(anyhow!("Failed to start service: {error:?}"));
         }
     }
+    // Need to read stderr/out concurrently to avoid hanging
+    let service = std::thread::spawn(|| service.wait_with_output());
 
     let client_output = client_command.output()?;
     println!(
@@ -102,11 +97,8 @@ fn run_command(mut client_command: Command) -> Result<(Output, Output)> {
         String::from_utf8_lossy(&client_output.stderr)
     );
 
-    signal::kill(
-        nix::unistd::Pid::from_raw(service.id().try_into()?),
-        Signal::SIGTERM,
-    )?;
-    let service_output = service.wait_with_output()?;
+    signal::kill(nix::unistd::Pid::from_raw(service_id), Signal::SIGTERM)?;
+    let service_output = service.join().unwrap()?;
     println!(
         "service_stderr: {}",
         String::from_utf8_lossy(&service_output.stderr)
@@ -154,7 +146,7 @@ fn sign_attached() -> Result<()> {
     );
 
     let mut signing_cert = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    signing_cert.push("../keys/secure-boot-code-signing-cert.pem");
+    signing_cert.push("../devel/creds/secure-boot-code-signing-cert.pem");
     let output_signed = Command::new("sbverify")
         .arg("--cert")
         .arg(&signing_cert)

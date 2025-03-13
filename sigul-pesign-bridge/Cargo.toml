@@ -1,8 +1,8 @@
 [package]
 name = "sigul-pesign-bridge"
-version = "0.2.1"
-rust-version = "1.79"
-edition = "2021"
+version = "0.3.0"
+edition = { workspace = true }
+rust-version = { workspace = true }
 license = "MIT"
 readme = "README.md"
 description = """
@@ -33,13 +33,17 @@ features = ["std", "derive", "env", "help", "usage", "error-context"]
 version = "0.29"
 features = ["socket", "uio", "fs"]
 
+[dependencies.siguldry]
+path = "../siguldry"
+version = "0.2"
+
 # Used to temporarily stash input files for sigul within the runtime directory.
 [dependencies.tempfile]
 version = "3"
 
 [dependencies.tokio]
 version = "1.27"
-features = ["io-util", "macros", "net", "rt", "signal", "time", "process"]
+features = ["io-util", "macros", "net", "rt", "signal", "time", "process", "fs"]
 
 # Used for the CancellationToken
 [dependencies.tokio-util]

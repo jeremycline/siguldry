@@ -80,6 +80,15 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install test packages
+        run: |
+          sudo apt update
+          sudo apt install pesign libssl-dev
+
+          # pesign-client doesn't let you configure the socket location, so make it available to the world
+          sudo mkdir -p /run/pesign/
+          sudo chmod -R 777 /run/pesign/
+
       - name: cargo fmt
         run: cargo fmt --all --check
 
@@ -88,15 +97,6 @@ jobs:
 
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features -- --deny warnings
-
-      - name: Install test packages
-        run: |
-          sudo apt update
-          sudo apt install pesign
-
-          # pesign-client doesn't let you configure the socket location, so make it available to the world
-          sudo mkdir -p /run/pesign/
-          sudo chmod -R 777 /run/pesign/
 
       - name: Run unit tests
         run: cargo test --all-features --workspace --no-fail-fast --bins --examples --benches
@@ -128,30 +128,14 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up test environment
+      - name: Integration tests
         run: |
           set -xeuo pipefail
 
-          mkdir -p ~/.sigul
-          cp devel/github/client.conf ~/.sigul/client.conf
-          cp -r /var/lib/sigul ~/.sigul/sigul
-          # GitHub actions occasionally hangs here; I've not seen it locally and my theory
-          # is sigul takes a bit of time to come up and doesn't do retries well at all.
-          sleep 5
-
-          # More hackiness; copy the test PE and signing certificates to the location
-          # it would be at if we had built it rather than baking it into the image.
-          # GitHub Actions does not use the container's WORKDIR.
-          cp -r /srv/siguldry/* .
-          mkdir keys/
-          cp *.pem keys/
-
+          # The sample UEFI application is baked into the image.
+          cp -r /srv/siguldry/target .
           mkdir -p /run/pesign/
-
-          # We aren't running under systemd here, so make up a fake CREDENTIALS_DIRECTORY
-          mkdir -p /srv/siguldry/mock_credentials/
-          echo -n "my-signing-password" > /srv/siguldry/mock_credentials/sigul-signing-key-passphrase
-          cp ./devel/github/client.conf /srv/siguldry/mock_credentials/sigul-client-config
-
-      - name: Integration tests
-        run: RUNTIME_DIRECTORY=/run/pesign CREDENTIALS_DIRECTORY=/srv/siguldry/mock_credentials/ cargo test --all-features --workspace -- --nocapture
+          export RUNTIME_DIRECTORY=/run/pesign
+          export CREDENTIALS_DIRECTORY=/srv/siguldry/creds/
+          export SIGUL_PESIGN_BRIDGE_CONFIG=$(pwd)/devel/github/config.toml
+          cargo test --all-features --workspace -- --nocapture

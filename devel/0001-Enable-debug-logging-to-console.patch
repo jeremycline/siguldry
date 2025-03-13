@@ -1,0 +1,54 @@
+From 6fcbe15d7bdce54bddc54506eeb76b1568b04955 Mon Sep 17 00:00:00 2001
+From: Jeremy Cline <jeremycline@linux.microsoft.com>
+Date: Thu, 13 Mar 2025 19:09:25 +0000
+Subject: [PATCH] Enable debug logging to console
+
+---
+ src/double_tls.py | 12 ++----------
+ src/utils.py      |  5 +----
+ 2 files changed, 3 insertions(+), 14 deletions(-)
+
+diff --git a/src/double_tls.py b/src/double_tls.py
+index b2edb21..f70dca9 100644
+--- a/src/double_tls.py
++++ b/src/double_tls.py
+@@ -48,18 +48,10 @@ def _id(obj):
+         __ids[obj] = new_id
+         return new_id
+ 
+-# _debug_file = None
+-# _debug_pid = None
+-
++import sys
+ 
+ def _debug(fmt, *args):
+-    # global _debug_pid, _debug_file
+-    # pid = os.getpid()
+-    # if _debug_pid != pid:
+-    #     _debug_pid = pid
+-    #     _debug_file = open('/tmp/debug%d' % os.getpid(), 'w', 0)
+-    # print >> _debug_file, fmt % args
+-    pass
++    print(fmt % args, file=sys.stderr)
+ 
+ 
+ class ChildConnectionRefusedError(Exception):
+diff --git a/src/utils.py b/src/utils.py
+index b91d9d4..7d6dae6 100644
+--- a/src/utils.py
++++ b/src/utils.py
+@@ -140,10 +140,7 @@ def logging_level_from_options(options):
+ 
+ 
+ def setup_logging(options, component):
+-    logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s',
+-                        level=logging_level_from_options(options),
+-                        filename=os.path.join(options.log_dir,
+-                                              'sigul_%s.log' % component))
++    logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s', level=logging.DEBUG)
+ 
+ 
+ def create_basic_parser(description, default_config_file):
+-- 
+2.48.1
+

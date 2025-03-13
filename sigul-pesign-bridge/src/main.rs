@@ -37,24 +37,23 @@ async fn main() -> Result<(), anyhow::Error> {
             runtime_directory,
             credentials_directory,
         } => {
-            let config = opts.config.unwrap_or_default();
-            config.validate(Some(&credentials_directory)).context(
-                "configuration format is correct, but references files that are missing or invalid",
-            )?;
-            let context = sigul_pesign_bridge::Context::new(
-                config,
-                runtime_directory,
-                credentials_directory,
-            )?;
+            let mut config = opts.config.unwrap_or_default();
+            config.fix_credentials(&credentials_directory)?;
+            config.validate()?;
+            let context = sigul_pesign_bridge::Context::new(config, runtime_directory)?;
 
             listen(context, halt_token)?.await?
         }
-        cli::Command::Config => {
-            let config = opts.config.unwrap_or_default();
-            println!("Current configuration:\n\n{}", config);
-            config.validate(None).inspect_err(|err|{
-                eprintln!("The configuration format is correct, but contain options which may be invalid: {}", err);
-            })
+        cli::Command::Config {
+            credentials_directory,
+        } => {
+            let mut config = opts.config.unwrap_or_default();
+            println!("{}", config);
+            let _ = config.fix_credentials(&credentials_directory);
+            let _ = config.validate().inspect_err(|e| eprintln!("The configuration format is correct, but contain options which may be invalid: {e:?}")
+            );
+
+            Ok(())
         }
     }
 }

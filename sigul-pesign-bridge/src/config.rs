@@ -22,29 +22,15 @@ use serde::{Deserialize, Serialize};
 /// The configuration file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// The systemd credentials ID of the Sigul client configuration.
-    ///
-    /// This configuration file includes the password to access the NSS database that contains the
-    /// client certificate used to authenticate with the Sigul server. As such, it is expected to
-    /// be provided by systemd's "ImportCredential" or "LoadCredentialEncrypted" option.
-    ///
-    /// # Example
-    ///
-    /// To prepare the encrypted configuration:
-    ///
-    /// ```bash
-    /// systemd-creds encrypt /secure/ramfs/sigul-client-config /etc/credstore.encrypted/sigul.client.cconfig
-    /// ```
-    ///
-    /// This will produce an encrypted blob which will be decrypted by systemd at runtime.
-    pub sigul_client_config: PathBuf,
-
     /// The total length of time (in seconds) to wait for a signing request to complete.
     ///
     /// The service will retry requests to the Sigul server until it succeeds or
     /// this timeout is reached, at which point it will signal to the pesign-client
     /// that the request failed.
     pub request_timeout_secs: NonZeroU64,
+
+    /// Configuration to connect to the Sigul server.
+    pub sigul: Siguldry,
 
     /// A list of signing keys available for use.
     ///
@@ -53,6 +39,56 @@ pub struct Config {
     /// request. If the requested key is not in this list, the request is
     /// rejected.
     pub keys: Vec<Key>,
+}
+
+/// Configuration to connect to the Sigul server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Siguldry {
+    /// The hostname of the Sigul bridge; this is used to verify the bridge's
+    /// TLS certificate.
+    pub bridge_hostname: String,
+    /// The port to connect to the Sigul bridge; the typical port is 44334.
+    pub bridge_port: u16,
+    /// The hostname of the Sigul server; this is used to verify the server's
+    /// TLS certificate.
+    pub server_hostname: String,
+    /// The username to use when authenticating with the Sigul bridge.
+    pub sigul_user_name: String,
+    /// The systemd credentials ID of the PEM-encoded private key file.
+    ///
+    /// This private key is the key that matches the `client_certificate` and is used to authenticate
+    /// with the Sigul bridge. It is expected to be provided by systemd's "ImportCredential" or
+    /// "LoadCredentialEncrypted" option.
+    ///
+    /// # Example
+    ///
+    /// To prepare the encrypted configuration:
+    ///
+    /// ```bash
+    /// systemd-creds encrypt /secure/ramfs/private-key.pem /etc/credstore.encrypted/sigul.client.private_key
+    /// ```
+    ///
+    /// This will produce an encrypted blob which will be decrypted by systemd at runtime.
+    pub private_key: PathBuf,
+    /// The path to client certificate that matches the `private_key`.
+    pub client_certificate: PathBuf,
+    /// The path to the certificate authority to use when verifying the Sigul bridge and Sigul
+    /// server certificates.
+    pub ca_certificate: PathBuf,
+}
+
+impl Default for Siguldry {
+    fn default() -> Self {
+        Self {
+            bridge_hostname: "localhost".into(),
+            bridge_port: 44334,
+            server_hostname: "localhost".into(),
+            sigul_user_name: "sigul-client".into(),
+            private_key: "sigul.client.private_key.pem".into(),
+            client_certificate: "sigul.client.certificate.pem".into(),
+            ca_certificate: "sigul.ca_certificate.pem".into(),
+        }
+    }
 }
 
 /// A signing key and certificate pair.
@@ -85,7 +121,7 @@ impl Default for Key {
         Self {
             key_name: "signing-key".to_string(),
             certificate_name: "codesigning".to_string(),
-            passphrase_path: PathBuf::from("sigul-signing-key-passphrase"),
+            passphrase_path: PathBuf::from("sigul.signing-key-passphrase"),
             certificate_file: None,
         }
     }
@@ -94,31 +130,108 @@ impl Default for Key {
 impl Key {
     /// The Sigul passphrase protecting this key.
     #[doc(hidden)]
-    pub fn passphrase(
-        &self,
-        credentials_directory: &std::path::Path,
-    ) -> Result<String, anyhow::Error> {
-        let credentials_path = credentials_directory.join(&self.passphrase_path);
-        let mut passphrase = std::fs::read_to_string(credentials_path)?;
-        if passphrase.contains('\n') {
-            return Err(anyhow!(
-                "Passphrase file {} contains a newline, which is not allowed.",
-                self.passphrase_path.display()
-            ));
-        }
+    pub fn passphrase(&self) -> Result<String, anyhow::Error> {
+        let passphrase = std::fs::read_to_string(&self.passphrase_path)?
+            .lines()
+            .next()
+            .and_then(|pass| {
+                let pass = pass.trim();
+                if !pass.is_empty() {
+                    Some(pass)
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| {
+                anyhow!(
+                    "Passphrase file {} does not contain a password on the first line",
+                    self.passphrase_path.display()
+                )
+            })?
+            .to_string();
 
-        passphrase.push('\0');
         Ok(passphrase)
     }
 }
 
 impl Config {
-    /// Get the absolute path to the Sigul client configuration file.
+    /// Fix up any relative paths in the configuration file to use the provided credentials directory.
     ///
-    /// The configuration file is expected to be stored relative to the CREDENTIALS_DIRECTORY.
+    /// # Errors
+    ///
+    /// If the referenced files don't exist, an error is returned.
     #[doc(hidden)]
-    pub fn sigul_client_config(&self, credentials_dir: &std::path::Path) -> PathBuf {
-        credentials_dir.join(&self.sigul_client_config)
+    pub fn fix_credentials(&mut self, credentials_dir: &std::path::Path) -> anyhow::Result<()> {
+        self
+            .keys
+            .iter_mut()
+            .map(|key| {
+                if key.passphrase_path.is_absolute() {
+                    tracing::warn!(
+                        passphrase_path = key.passphrase_path.display().to_string(),
+                        key_name = key.key_name,
+                        "Path to passphrase file is absolute; consider using systemd credentials"
+                    );
+                } else {
+                    let passphrase_path = credentials_dir.join(&key.passphrase_path);
+                    if !passphrase_path.exists() {
+                        return Err(anyhow::anyhow!(
+                            "No file named '{}' found in credentials directory",
+                            key.passphrase_path.display(),
+                        ));
+                    }
+                    key.passphrase_path = passphrase_path;
+                }
+
+                if let Some(ca_cert) = &key.certificate_file {
+                    if !ca_cert.is_absolute() {
+                        let absolute_ca_cert = credentials_dir.join(ca_cert);
+                        if !absolute_ca_cert.exists() {
+                            tracing::error!(key.key_name, ?key.certificate_file, "CA file is not an absolute path and isn't in the credentials directory");
+                            return Err(anyhow::anyhow!("CA file '{}' is missing", ca_cert.display()));
+                        }
+                        key.certificate_file = Some(absolute_ca_cert);
+                    }
+
+                }
+
+                Ok(())
+            }).collect::<Result<Vec<_>, _>>()?;
+
+        if self.sigul.private_key.is_absolute() {
+            tracing::warn!(
+                private_key = self.sigul.private_key.display().to_string(),
+                "Path to private key file is absolute; consider using systemd credentials"
+            );
+        } else {
+            self.sigul.private_key = credentials_dir.join(&self.sigul.private_key);
+            if !self.sigul.private_key.exists() {
+                return Err(anyhow::anyhow!(
+                    "No private key file named '{}' found in credentials directory",
+                    self.sigul.private_key.display()
+                ));
+            }
+        }
+        if !self.sigul.client_certificate.is_absolute() {
+            self.sigul.client_certificate = credentials_dir.join(&self.sigul.client_certificate);
+            if !self.sigul.client_certificate.exists() {
+                return Err(anyhow::anyhow!(
+                    "No client certificate file named '{}' found in credentials directory",
+                    self.sigul.client_certificate.display()
+                ));
+            }
+        }
+        if !self.sigul.ca_certificate.is_absolute() {
+            self.sigul.ca_certificate = credentials_dir.join(&self.sigul.ca_certificate);
+            if !self.sigul.ca_certificate.exists() {
+                return Err(anyhow::anyhow!(
+                    "No CA certificate file named '{}' found in credentials directory",
+                    self.sigul.ca_certificate.display()
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     /// Check the configuration file for validity.
@@ -126,23 +239,29 @@ impl Config {
     /// An error is returned if the files referenced do not exist, or if any of them contain invalid
     /// values.
     #[doc(hidden)]
-    pub fn validate(&self, credentials_dir: Option<&std::path::Path>) -> anyhow::Result<()> {
-        if let Some(dir) = credentials_dir {
-            if self
-                .keys
-                .iter()
-                .map(|k| {
-                    k.passphrase(dir)
-                        .err()
-                        .inspect(|e| tracing::error!(error=%e))
-                })
-                .any(|err| err.is_some())
-            {
-                return Err(anyhow!(
-                    "One or more passphrase files are missing or contain newlines"
-                ));
-            }
-        }
+    pub fn validate(&self) -> anyhow::Result<()> {
+        self.keys
+            .iter()
+            .map(|key| {
+                key.passphrase()
+                    .inspect_err(|e| tracing::error!(path=?key.passphrase_path, error=%e))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        self.keys
+            .iter()
+            .filter_map(|key| key.certificate_file.as_ref())
+            .map(|ca_cert| {
+                if !ca_cert.exists() {
+                    Err(anyhow::anyhow!(
+                        "The CA file '{}' does not exist",
+                        ca_cert.display()
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+            .collect::<Result<Vec<_>, anyhow::Error>>()?;
 
         if self.keys.iter().any(|key| key.certificate_file.is_some()) {
             let mut command = std::process::Command::new("sbverify");
@@ -173,9 +292,9 @@ impl std::fmt::Display for Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            request_timeout_secs: NonZeroU64::new(60 * 15).expect("Don't set the default to 0"),
+            request_timeout_secs: NonZeroU64::new(60 * 2).expect("Don't set the default to 0"),
             keys: vec![Key::default()],
-            sigul_client_config: PathBuf::from("sigul-client-config"),
+            sigul: Siguldry::default(),
         }
     }
 }
