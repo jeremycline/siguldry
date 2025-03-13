@@ -1,0 +1,73 @@
+[package]
+name = "siguldry"
+license = "MIT"
+edition = { workspace = true }
+rust-version = { workspace = true }
+version = "0.2.0"
+readme = "README.md"
+description = """
+An implementation of the Sigul protocol.
+"""
+keywords = ["pesign", "sigul", "fedora"]
+repository = "https://github.com/fedora-infra/siguldry"
+
+[features]
+default = []
+client-cli = ["clap", "tracing-subscriber", "tokio/fs"]
+
+
+[dependencies.anyhow]
+version = "1"
+
+[dependencies.bytes]
+version = "1"
+
+[dependencies.clap]
+version = "4.0"
+default-features = false
+features = ["std", "derive", "env", "help", "usage", "error-context"]
+optional = true
+
+[dependencies.openssl]
+version = "0.10"
+
+[dependencies.serde]
+version = "1.0.145"
+features = ["derive"]
+
+[dependencies.thiserror]
+version = "2"
+
+[dependencies.tokio]
+version = "1.27"
+features = ["macros", "net", "rt", "io-util", "time"]
+
+[dependencies.tokio-util]
+version = "0.7"
+features = ["io"]
+
+[dependencies.tokio-openssl]
+version = "0.6"
+
+[dependencies.tracing]
+version = "0.1.36"
+
+[dependencies.tracing-subscriber]
+version = "0.3.17"
+default-features = false
+features = ["std", "registry", "fmt", "env-filter"]
+optional = true
+
+
+[dev-dependencies]
+anyhow = "1"
+proptest = "1.6"
+
+[dev-dependencies.pyo3]
+version = "0.23"
+features = ["auto-initialize"]
+
+
+[[bin]]
+name = "siguldry-client"
+required-features = ["client-cli"]

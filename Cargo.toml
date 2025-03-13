@@ -3,5 +3,12 @@ resolver = "2"
 members = [ 
     "sample-uefi",
     "sigul-pesign-bridge",
+    "siguldry",
     "xtask",
 ]
+
+[workspace.package]
+# This targets the latest Enterprise Linux Rust version.
+rust-version = "1.79"
+edition = "2021"
+license = "MIT"
