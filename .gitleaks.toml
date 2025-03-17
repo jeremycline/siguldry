@@ -1,0 +1,10 @@
+title = "Gitleaks config to ignore test keys"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Ignore private keys extracted from the CI test image"
+paths = [
+	"devel/creds/sigul.client.private_key.pem",
+]
