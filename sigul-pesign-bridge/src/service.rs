@@ -596,7 +596,7 @@ mod tests {
     fn config() -> Config {
         let mut config = Config::default();
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let outdir = root.join("../devel/creds");
+        let outdir = root.join("devel/creds");
         config
             .fix_credentials(&outdir)
             .expect("extract CI credentials with 'cargo xtask extract-keys'");

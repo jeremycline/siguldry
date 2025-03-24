@@ -6,30 +6,53 @@
 # non-optional configuration keys. All keys are required unless explicitly
 # noted as optional.
 
-# The systemd credentials ID of the Sigul client configuration.
-#
-# The sigul client configuration file includes the password to access the NSS
-# database that contains the client certificate used to authenticate with the
-# Sigul server. As such, it is expected to be provided by systemd's
-# "ImportCredential" or "LoadCredentialEncrypted" option.
-#
-# # Example
-#
-# To prepare the encrypted configuration:
-#
-# ```bash
-# systemd-creds encrypt /secure/ramfs/sigul-client-config /etc/credstore.encrypted/sigul.client.config
-# ```
-#
-# This will produce an encrypted blob which will be decrypted by systemd at runtime.
-sigul_client_config = "sigul.client.config"
-
 # The total length of time (in seconds) to wait for a signing request to complete.
 #
 # The service will retry requests to the Sigul server until it succeeds or
 # this timeout is reached, at which point it will signal to the pesign-client
 # that the request failed. This must be a non-zero value.
 request_timeout_secs = 600
+
+# Configuration to connect to the Sigul server.
+[sigul]
+# The hostname of the Sigul bridge; this is used to verify the bridge's
+# TLS certificate.
+bridge_hostname = "sigul-bridge.example.com"
+
+# The port to connect to the Sigul bridge; the typical port is 44334.
+bridge_port = 44334
+
+# The hostname of the Sigul server; this is used to verify the server's
+# TLS certificate.
+server_hostname = "sigul-server.example.com"
+
+# The username to use when authenticating with the Sigul bridge.
+sigul_user_name = "sigul-client"
+
+# The systemd credentials ID of the PEM-encoded private key file.
+#
+# This private key is the key that matches the `client_certificate` and is used to authenticate
+# with the Sigul bridge. It is expected to be provided by systemd's "ImportCredential" or
+# "LoadCredentialEncrypted" option.
+#
+# # Example
+#
+# To prepare the encrypted configuration:
+#
+# ```bash
+# systemd-creds encrypt /secure/ramfs/private-key.pem /etc/credstore.encrypted/sigul.client.private_key
+# ```
+#
+# This will produce an encrypted blob which will be decrypted by systemd at runtime.
+private_key = "sigul.client.private_key.pem"
+
+# The path to client certificate that matches the `private_key`.
+client_certificate = "sigul.client.certificate.pem"
+
+# The path to the certificate authority to use when verifying the Sigul bridge and Sigul
+# server certificates.
+ca_certificate = "sigul.ca_certificate.pem"
+
 
 # A list of signing keys available for use.
 #
@@ -54,6 +77,7 @@ passphrase_path = "sigul.signing-key.passphrase"
 # before returning the signed file to the client. This validation is done with the
 # "sbverify" application, which must be installed to use this option.
 certificate_file = "/path/to/signing/certificate.pem"
+
 
 # Additional signing keys can be specified.
 [[keys]]
