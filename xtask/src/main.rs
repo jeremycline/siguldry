@@ -35,23 +35,19 @@ fn generate_manual() -> anyhow::Result<()> {
 fn extract_keys() -> anyhow::Result<()> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let outdir = root.join("../devel/creds");
+    let image = env::args()
+        .nth(2)
+        .unwrap_or_else(|| "quay.io/jeremycline/sigul-pesign-bridge-ci:latest".to_string());
+    println!("Extracting keys from {}", &image);
 
     let mut command = std::process::Command::new("podman");
-    command.args(["pull", "quay.io/jeremycline/sigul-pesign-bridge-ci:latest"]);
+    command.args(["create", "--name=sigul-ci-key-extract", &image]);
     if !command.output()?.status.success() {
-        anyhow::bail!("Failed to pull CI image");
+        anyhow::bail!("Failed to create container (have you pulled it?)");
     }
 
-    let mut command = std::process::Command::new("podman");
-    command.args([
-        "create",
-        "--name=sigul-ci-key-extract",
-        "quay.io/jeremycline/sigul-pesign-bridge-ci:latest",
-    ]);
-    if !command.output()?.status.success() {
-        anyhow::bail!("Failed to create container");
-    }
-
+    // Drop the existing credentials or the new ones end up in devel/creds/creds
+    let _ = std::fs::remove_dir_all(&outdir);
     let mut command = std::process::Command::new("podman");
     command.args(["cp", "sigul-ci-key-extract:/srv/siguldry/creds"]);
     command.arg(outdir);
