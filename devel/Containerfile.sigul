@@ -62,12 +62,12 @@ COPY target/x86_64-unknown-uefi/debug/sample-uefi.efi target/x86_64-unknown-uefi
 
 # Fix pesign in Sigul
 RUN curl -sL \
-	https://pagure.io/fork/jcline/sigul/c/5b160415b77d40ea80aeb9d9eb1a8c9ec6cf1926.patch \
+	https://pagure.io/sigul/pull-request/29.patch \
 	| patch /usr/share/sigul/server.py
 
 # Support PKCS11 signing
 RUN curl -sL \
-	https://pagure.io/fork/jcline/sigul/c/d70285810c63f6e136f70fb13a4b6323f9db3db1.patch \
+	https://pagure.io/sigul/pull-request/31.patch \
 	| patch -d /usr/share/sigul/ && \
 	chmod +x /usr/share/sigul/server_add_pkcs11_token.py
 
