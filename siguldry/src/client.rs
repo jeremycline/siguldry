@@ -44,6 +44,12 @@ impl From<String> for Password {
     }
 }
 
+impl From<&str> for Password {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
 impl TryFrom<&Path> for Password {
     type Error = Error;
 
@@ -87,6 +93,12 @@ pub(crate) enum Command {
         /// The user to authenticate as.
         user: String,
     },
+    UserInfo {
+        /// The user to authenticate as.
+        user: String,
+        /// The user to retrieve info for.
+        name: String,
+    },
 }
 
 impl std::fmt::Debug for Command {
@@ -104,6 +116,35 @@ impl std::fmt::Debug for Command {
                 .field("cert_name", cert_name)
                 .finish(),
             Self::ListUsers { user } => f.debug_struct("ListUsers").field("user", user).finish(),
+            Self::UserInfo { user, name } => f
+                .debug_struct("UserInfo")
+                .field("user", user)
+                .field("name", name)
+                .finish(),
+        }
+    }
+}
+
+/// Response types used by the client.
+pub mod responses {
+    /// A Sigul user.
+    #[derive(Debug, Clone)]
+    pub struct User {
+        /// The username.
+        pub(crate) name: String,
+        /// True if the user is a sigul administrator
+        pub(crate) admin: bool,
+    }
+
+    impl User {
+        /// The user's name.
+        pub fn name(&self) -> &str {
+            &self.name
+        }
+
+        /// Returns true if the user is a Sigul administrator.
+        pub fn admin(&self) -> bool {
+            self.admin
         }
     }
 }
@@ -273,6 +314,57 @@ impl Client {
         }
 
         Ok(users)
+    }
+
+    /// Get information about the given user
+    #[instrument(skip_all)]
+    pub async fn get_user(
+        &self,
+        admin_passphrase: Password,
+        name: String,
+    ) -> Result<responses::User, Error> {
+        let connection = self.connect().await?;
+
+        let (mut payload_reader, payload_writer) = tokio::io::simplex(4096);
+        let payload_reader = tokio::spawn(
+            async move {
+                let mut payload = vec![];
+                payload_reader.read_to_end(&mut payload).await?;
+                tracing::debug!(payload_length = payload.len(), "Response payload received",);
+                Ok::<_, std::io::Error>(payload)
+            }
+            .in_current_span(),
+        );
+
+        let mut inner_request = HashMap::new();
+        inner_request.insert("password", admin_passphrase.as_bytes());
+        let response = connection
+            .outer_request::<tokio::io::Empty>(
+                Command::UserInfo {
+                    user: self.user_name.clone(),
+                    name: name.clone(),
+                },
+                None,
+            )
+            .await?
+            .inner_request(self.tls_config.ssl(&self.server_hostname)?, inner_request)
+            .await?
+            .response(payload_writer)
+            .await?;
+        tracing::info!(response.status_code, "Sigul response received");
+        let payload = payload_reader
+            .await
+            .context("response payload could not be read")??;
+        assert!(payload.is_empty());
+
+        let admin = response
+            .fields
+            .get("admin")
+            .and_then(|b| b.first())
+            .map(|b| *b == 1)
+            .ok_or(anyhow::anyhow!("missing expected field 'admin'"))?;
+
+        Ok(responses::User { name, admin })
     }
 
     /// Sign a platform executable (PE) file for Secure Boot.

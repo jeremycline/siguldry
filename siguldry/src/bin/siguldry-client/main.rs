@@ -45,6 +45,16 @@ enum Command {
         #[arg(long)]
         admin_passphrase: PathBuf,
     },
+    /// Show information about a user.
+    ///
+    /// The only information available is whether or not the user is an administrator.
+    UserInfo {
+        #[arg(long)]
+        admin_passphrase: PathBuf,
+        /// The name of the user to look up.
+        #[arg(long)]
+        name: String,
+    },
     SignPe {
         #[arg(long)]
         input: PathBuf,
@@ -103,6 +113,18 @@ async fn main() -> anyhow::Result<()> {
             for user in users {
                 println!("{}", user);
             }
+        }
+        Command::UserInfo {
+            admin_passphrase,
+            name,
+        } => {
+            let user = tokio::time::timeout(
+                Duration::from_secs(30),
+                client.get_user(admin_passphrase.as_path().try_into()?, name),
+            )
+            .await
+            .context("request timed out")??;
+            println!("Administrator: {}", if user.admin() { "yes" } else { "no" });
         }
         Command::SignPe {
             input,
