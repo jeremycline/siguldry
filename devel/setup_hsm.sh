@@ -77,7 +77,7 @@ pkcs11-tool --module /usr/lib64/softhsm/libsofthsm.so \
 chown -R sigul:sigul /var/lib/softhsm/
 
 echo "my-signing-password" > sigul.signing-key-passphrase
-/usr/share/sigul/server_add_pkcs11_token.py --initial-key-admin sigul-client \
+sigul_server_add_pkcs11_token --initial-key-admin sigul-client \
 	--key-uri "${SIGNING_KEY_URI}" \
 	--key-name "Sigul HSM Key" \
 	--token-pin-file ./hsm_pin \

@@ -12,7 +12,7 @@
 FROM quay.io/almalinuxorg/almalinux:9
 
 RUN dnf install -y epel-release
-RUN dnf install -y \
+RUN dnf install -y --enablerepo=epel-testing \
     cargo \
     gcc \
     iproute \
@@ -59,17 +59,6 @@ RUN chown -R sigul:sigul /var/lib/sigul/
 # This needs to be built with 'cargo build --target x86_64-unknown-uefi -p sample-uefi'
 RUN mkdir -p target/x86_64-unknown-uefi/debug/
 COPY target/x86_64-unknown-uefi/debug/sample-uefi.efi target/x86_64-unknown-uefi/debug/sample-uefi.efi
-
-# Fix pesign in Sigul
-RUN curl -sL \
-	https://pagure.io/sigul/pull-request/29.patch \
-	| patch /usr/share/sigul/server.py
-
-# Support PKCS11 signing
-RUN curl -sL \
-	https://pagure.io/sigul/pull-request/31.patch \
-	| patch -d /usr/share/sigul/ && \
-	chmod +x /usr/share/sigul/server_add_pkcs11_token.py
 
 RUN patch -d /usr/share/sigul/ < /srv/siguldry/0001-Enable-debug-logging-to-console.patch
 
