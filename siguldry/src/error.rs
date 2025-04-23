@@ -9,7 +9,7 @@
 pub enum ClientError {
     /// Returned in the event that an error occurred while communicating with the Sigul bridge or
     /// Sigul server. This may be a result of a transient networking problem, or because of a more
-    /// permanent issue such and invalid configuration, or event a client bug.
+    /// permanent issue such and invalid configuration, or even a client bug.
     ///
     /// Retrying the operation that led to this error should be safe, although whether subsequent
     /// attempts fail or succeed depend on the specific error.  Refer to [`ConnectionError`] for
