@@ -40,12 +40,15 @@ fn get_client() -> siguldry::client::Client {
     )
 }
 
+// Assert our user is in the list somewhere; since this runs at the same time
+// as tests that create and remove users this is the best we can do.
 #[tokio::test]
 async fn list_users() -> anyhow::Result<()> {
     let client = get_client();
+    let expected_user = "sigul-client".to_string();
     let users = client.users("my-admin-password".into()).await?;
 
-    assert_eq!(users, vec!["sigul-client"]);
+    assert!(users.contains(&expected_user));
     Ok(())
 }
 
@@ -87,5 +90,53 @@ async fn get_user_invalid_password() -> anyhow::Result<()> {
     } else {
         panic!("Expected a Sigul error, got {:?}", user)
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn create_user_no_password() -> anyhow::Result<()> {
+    let client = get_client();
+    client
+        .delete_user("my-admin-password".into(), "no-password-user".to_string())
+        .await?;
+
+    client
+        .create_user(
+            "my-admin-password".into(),
+            "no-password-user".to_string(),
+            false,
+            None,
+        )
+        .await?;
+    let user = client
+        .get_user("my-admin-password".into(), "no-password-user".to_string())
+        .await?;
+
+    assert_eq!(user.name(), "no-password-user");
+    assert!(!user.admin());
+    Ok(())
+}
+
+#[tokio::test]
+async fn create_user_with_password() -> anyhow::Result<()> {
+    let client = get_client();
+    client
+        .delete_user("my-admin-password".into(), "with-password-user".to_string())
+        .await?;
+
+    client
+        .create_user(
+            "my-admin-password".into(),
+            "with-password-user".to_string(),
+            true,
+            Some("with-password".into()),
+        )
+        .await?;
+    let user = client
+        .get_user("my-admin-password".into(), "with-password-user".to_string())
+        .await?;
+
+    assert_eq!(user.name(), "with-password-user");
+    assert!(user.admin());
     Ok(())
 }
