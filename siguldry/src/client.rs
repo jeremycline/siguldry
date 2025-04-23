@@ -81,7 +81,7 @@ impl TryFrom<&Path> for Password {
 }
 
 /// Sigul commands supported by this client.
-#[derive(Serialize)]
+#[derive(Serialize, Debug, Clone)]
 pub(crate) enum Command {
     SignPe {
         /// The user to authenticate as.
@@ -99,30 +99,35 @@ pub(crate) enum Command {
         /// The user to retrieve info for.
         name: String,
     },
-}
+    NewUser {
+        /// The user to authenticate as.
+        user: String,
+        /// The name of the new user.
+        name: String,
+        /// Whether the new user is an administrator.
+        admin: bool,
+    },
+    DeleteUser {
+        /// The user to authenticate as.
+        user: String,
+        /// The user to delete.
+        name: String,
+    },
+    ModifyUser {
+        /// The user to authenticate as.
+        user: String,
 
-impl std::fmt::Debug for Command {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Redact any sensitive information here that shouldn't be logged.
-        match self {
-            Self::SignPe {
-                user,
-                key,
-                cert_name,
-            } => f
-                .debug_struct("SignPe")
-                .field("user", user)
-                .field("key", key)
-                .field("cert_name", cert_name)
-                .finish(),
-            Self::ListUsers { user } => f.debug_struct("ListUsers").field("user", user).finish(),
-            Self::UserInfo { user, name } => f
-                .debug_struct("UserInfo")
-                .field("user", user)
-                .field("name", name)
-                .finish(),
-        }
-    }
+        /// The user to modify.
+        name: String,
+
+        /// Whether or not the user should be an admin. Providing `None` means no change.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        admin: Option<bool>,
+
+        /// The new user name, if a change is desired. Providing `None` means no change.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        new_name: Option<String>,
+    },
 }
 
 /// Response types used by the client.
@@ -212,6 +217,25 @@ impl TlsConfig {
     }
 }
 
+/// Utility for commands that don't expect large (or any) payload response.
+fn get_payload_pipe() -> (
+    tokio::task::JoinHandle<Result<Vec<u8>, std::io::Error>>,
+    tokio::io::WriteHalf<tokio::io::SimplexStream>,
+) {
+    let (mut payload_reader, payload_writer) = tokio::io::simplex(4096);
+    let payload = tokio::spawn(
+        async move {
+            let mut payload = vec![];
+            payload_reader.read_to_end(&mut payload).await?;
+            tracing::debug!(payload_length = payload.len(), "Response payload received",);
+            Ok::<_, std::io::Error>(payload)
+        }
+        .in_current_span(),
+    );
+
+    (payload, payload_writer)
+}
+
 impl Client {
     /// Create a new Sigul client.
     ///
@@ -244,17 +268,7 @@ impl Client {
     #[instrument(skip_all)]
     pub async fn users(&self, admin_passphrase: Password) -> Result<Vec<String>, Error> {
         let connection = self.connect().await?;
-
-        let (mut payload_reader, payload_writer) = tokio::io::simplex(4096);
-        let payload_reader = tokio::spawn(
-            async move {
-                let mut payload = vec![];
-                payload_reader.read_to_end(&mut payload).await?;
-                tracing::debug!(payload_length = payload.len(), "Response payload received",);
-                Ok::<_, std::io::Error>(payload)
-            }
-            .in_current_span(),
-        );
+        let (payload_reader, payload_writer) = get_payload_pipe();
 
         let mut inner_request = HashMap::new();
         inner_request.insert("password", admin_passphrase.as_bytes());
@@ -324,17 +338,7 @@ impl Client {
         name: String,
     ) -> Result<responses::User, Error> {
         let connection = self.connect().await?;
-
-        let (mut payload_reader, payload_writer) = tokio::io::simplex(4096);
-        let payload_reader = tokio::spawn(
-            async move {
-                let mut payload = vec![];
-                payload_reader.read_to_end(&mut payload).await?;
-                tracing::debug!(payload_length = payload.len(), "Response payload received",);
-                Ok::<_, std::io::Error>(payload)
-            }
-            .in_current_span(),
-        );
+        let (payload_reader, payload_writer) = get_payload_pipe();
 
         let mut inner_request = HashMap::new();
         inner_request.insert("password", admin_passphrase.as_bytes());
@@ -365,6 +369,129 @@ impl Client {
             .ok_or(anyhow::anyhow!("missing expected field 'admin'"))?;
 
         Ok(responses::User { name, admin })
+    }
+
+    /// Add a new user to the Sigul server.
+    ///
+    /// If the `admin` parameter is `true`, the new user is created as a server administrator.
+    /// Optionally, the new user's password can be set. If it is not set when the user is created,
+    /// it can be set using [`Client::modify_user`].
+    #[instrument(skip_all)]
+    pub async fn create_user(
+        &self,
+        admin_passphrase: Password,
+        name: String,
+        admin: bool,
+        user_passphrase: Option<Password>,
+    ) -> Result<(), Error> {
+        let connection = self.connect().await?;
+        let (payload_reader, payload_writer) = get_payload_pipe();
+
+        let mut inner_request = HashMap::new();
+        inner_request.insert("password", admin_passphrase.as_bytes());
+        user_passphrase
+            .as_ref()
+            .map(|p| inner_request.insert("new-password", p.as_bytes()));
+        let response = connection
+            .outer_request::<tokio::io::Empty>(
+                Command::NewUser {
+                    user: self.user_name.clone(),
+                    name,
+                    admin,
+                },
+                None,
+            )
+            .await?
+            .inner_request(self.tls_config.ssl(&self.server_hostname)?, inner_request)
+            .await?
+            .response(payload_writer)
+            .await?;
+        tracing::info!(response.status_code, "Sigul response received");
+        let payload = payload_reader
+            .await
+            .context("response payload could not be read")??;
+        assert!(payload.is_empty());
+
+        Ok(())
+    }
+
+    /// Modify an existing user on the Sigul server.
+    ///
+    /// Users can have new names, their password changed, and be set as admins or not.
+    /// Providing `None` for any optional parameters will leave that setting unchanged.
+    #[instrument(skip_all)]
+    pub async fn modify_user(
+        &self,
+        admin_passphrase: Password,
+        name: String,
+        new_name: Option<String>,
+        admin: Option<bool>,
+        user_passphrase: Option<Password>,
+    ) -> Result<(), Error> {
+        let connection = self.connect().await?;
+        let (payload_reader, payload_writer) = get_payload_pipe();
+
+        let mut inner_request = HashMap::new();
+        inner_request.insert("password", admin_passphrase.as_bytes());
+        user_passphrase
+            .as_ref()
+            .map(|p| inner_request.insert("new-password", p.as_bytes()));
+        let response = connection
+            .outer_request::<tokio::io::Empty>(
+                Command::ModifyUser {
+                    user: self.user_name.clone(),
+                    name,
+                    new_name,
+                    admin,
+                },
+                None,
+            )
+            .await?
+            .inner_request(self.tls_config.ssl(&self.server_hostname)?, inner_request)
+            .await?
+            .response(payload_writer)
+            .await?;
+        tracing::info!(response.status_code, "Sigul response received");
+        let payload = payload_reader
+            .await
+            .context("response payload could not be read")??;
+        assert!(payload.is_empty());
+
+        Ok(())
+    }
+
+    /// Remove a user from the Sigul server.
+    ///
+    /// Users can only be deleted if they do not have access to any keys, and this call will
+    /// fail with [`crate::error::Sigul::UserHasKeyAccess`] if an attempt is made to delete a
+    /// user with key access.
+    #[instrument(skip_all)]
+    pub async fn delete_user(&self, admin_passphrase: Password, name: String) -> Result<(), Error> {
+        let connection = self.connect().await?;
+        let (payload_reader, payload_writer) = get_payload_pipe();
+
+        let mut inner_request = HashMap::new();
+        inner_request.insert("password", admin_passphrase.as_bytes());
+        let response = connection
+            .outer_request::<tokio::io::Empty>(
+                Command::DeleteUser {
+                    user: self.user_name.clone(),
+                    name,
+                },
+                None,
+            )
+            .await?
+            .inner_request(self.tls_config.ssl(&self.server_hostname)?, inner_request)
+            .await?
+            .response(payload_writer)
+            .await?;
+        tracing::info!(response.status_code, "Sigul response received");
+        let payload = payload_reader
+            .await
+            .context("response payload could not be read")??;
+        assert!(payload.is_empty());
+
+        Ok(())
     }
 
     /// Sign a platform executable (PE) file for Secure Boot.

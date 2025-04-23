@@ -251,15 +251,17 @@ impl ser::Serializer for &mut Serializer {
     //  The remaining fns are for types we don't support and all return errors.  //
     ///////////////////////////////////////////////////////////////////////////////
 
+    /// Optional types aren't really supported, for structures with Options they _must_
+    /// be marked with `#[serde(skip_serializing_if = "Option::is_none")]`
     fn serialize_none(self) -> std::result::Result<Self::Ok, Self::Error> {
         Err(Error::UnsupportedType)
     }
 
-    fn serialize_some<T>(self, _value: &T) -> std::result::Result<Self::Ok, Self::Error>
+    fn serialize_some<T>(self, value: &T) -> std::result::Result<Self::Ok, Self::Error>
     where
         T: ?Sized + Serialize,
     {
-        Err(Error::UnsupportedType)
+        value.serialize(self)
     }
 
     fn serialize_unit(self) -> std::result::Result<Self::Ok, Self::Error> {
@@ -583,6 +585,45 @@ mod tests {
             fields.set_item("op", "sign-something-else")?;
             fields.set_item("a-bool", true)?;
             fields.set_item("int", 2_000_000)?;
+            let fields = fields.into_py_dict(py)?;
+
+            let python_result = format_fields
+                .call1((fields,))
+                .map(|bytes| bytes.extract::<Vec<u8>>())??;
+
+            assert_eq!(rust_result, python_result);
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn serialize_optional_types() -> anyhow::Result<()> {
+        #[derive(Serialize)]
+        enum Ops {
+            SignSomethingElse {
+                #[serde(skip_serializing_if = "Option::is_none")]
+                a_bool: Option<bool>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                a_string: Option<String>,
+            },
+        }
+
+        let op = Ops::SignSomethingElse {
+            a_bool: None,
+            a_string: Some("string".to_string()),
+        };
+
+        let rust_result = super::to_bytes(&op)?;
+
+        // There should only be one serialized field.
+        Python::with_gil(|py| {
+            let code = std::ffi::CString::new(SIGUL)?;
+            let sigul = PyModule::from_code(py, &code, c"serde.py", c"serde")?;
+            let format_fields = sigul.getattr("format_fields")?;
+            let fields = PyDict::new(py);
+            fields.set_item("op", "sign-something-else")?;
+            fields.set_item("a-string", "string")?;
             let fields = fields.into_py_dict(py)?;
 
             let python_result = format_fields

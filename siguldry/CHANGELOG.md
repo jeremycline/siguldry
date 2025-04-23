@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added support for the 'user-info' command to the siguldry client (#32)
 
-- Added support for the 'new-user' and 'delete-user' commands to the siguldry client (#46)
+- Added support for the 'new-user', 'modify-user', and 'delete-user' commands to the siguldry client (#46)
 
 ### Changed
 
