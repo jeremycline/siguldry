@@ -1,4 +1,5 @@
-request_timeout_secs = 30
+total_request_timeout_secs = 30
+sigul_request_timeout_secs = 5
 
 [sigul]
 bridge_hostname = "sigul-bridge"

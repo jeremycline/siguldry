@@ -11,7 +11,13 @@
 # The service will retry requests to the Sigul server until it succeeds or
 # this timeout is reached, at which point it will signal to the pesign-client
 # that the request failed. This must be a non-zero value.
-request_timeout_secs = 600
+total_request_timeout_secs = 600
+
+# The timeout (in seconds) to wait for a response from the Sigul server.
+#
+# Requests that time out are retried until `total_request_timeout_secs` is reached.
+# As such, this value should be several times smaller than `total_request_timeout_secs`.
+sigul_request_timeout_secs = 60
 
 # Configuration to connect to the Sigul server.
 [sigul]

@@ -40,32 +40,73 @@ systemd credentials.
 The configuration format with in-line documentation:
 
 ```toml
-# The systemd credentials ID of the Sigul client configuration.
+# An example configuration file for sigul-pesign-bridge.
 #
-# The sigul client configuration file includes the password to access the NSS
-# database that contains the client certificate used to authenticate with the
-# Sigul server. As such, it is expected to be provided by systemd's
-# "ImportCredential" or "LoadCredentialEncrypted" option.
-# 
-# # Example
-# 
-# To prepare the encrypted configuration:
-# 
-# ```bash
-# systemd-creds encrypt /secure/ramfs/sigul-client-config /etc/credstore.encrypted/sigul.client.config
-# ```
-# 
-# This will produce an encrypted blob which will be decrypted by systemd at runtime.
-sigul_client_config = "sigul.client.config"
+# In order to use the service you will need to alter this as it requires
+# the signing key names you're using, at a minimum. The service does not
+# support configuration overrides so you must have a valid value for all
+# non-optional configuration keys. All keys are required unless explicitly
+# noted as optional.
 
 # The total length of time (in seconds) to wait for a signing request to complete.
 #
 # The service will retry requests to the Sigul server until it succeeds or
 # this timeout is reached, at which point it will signal to the pesign-client
 # that the request failed. This must be a non-zero value.
-request_timeout_secs = 600
+total_request_timeout_secs = 600
+
+# The timeout (in seconds) to wait for a response from the Sigul server.
+#
+# Requests that time out are retried until `total_request_timeout_secs` is reached.
+# As such, this value should be several times smaller than `total_request_timeout_secs`.
+sigul_request_timeout_secs = 60
+
+# Configuration to connect to the Sigul server.
+[sigul]
+# The hostname of the Sigul bridge; this is used to verify the bridge's
+# TLS certificate.
+bridge_hostname = "sigul-bridge.example.com"
+
+# The port to connect to the Sigul bridge; the typical port is 44334.
+bridge_port = 44334
+
+# The hostname of the Sigul server; this is used to verify the server's
+# TLS certificate.
+server_hostname = "sigul-server.example.com"
+
+# The username to use when authenticating with the Sigul bridge.
+sigul_user_name = "sigul-client"
+
+# The systemd credentials ID of the PEM-encoded private key file.
+#
+# This private key is the key that matches the `client_certificate` and is used to authenticate
+# with the Sigul bridge. It is expected to be provided by systemd's "ImportCredential" or
+# "LoadCredentialEncrypted" option.
+#
+# # Example
+#
+# To prepare the encrypted configuration:
+#
+# ```bash
+# systemd-creds encrypt /secure/ramfs/private-key.pem /etc/credstore.encrypted/sigul.client.private_key
+# ```
+#
+# This will produce an encrypted blob which will be decrypted by systemd at runtime.
+private_key = "sigul.client.private_key.pem"
+
+# The path to client certificate that matches the `private_key`.
+client_certificate = "sigul.client.certificate.pem"
+
+# The path to the certificate authority to use when verifying the Sigul bridge and Sigul
+# server certificates.
+ca_certificate = "sigul.ca_certificate.pem"
+
 
 # A list of signing keys available for use.
+#
+# The pesign-client requests a signing key and certificate using the `--token`
+# and `--certificate` arguments respectively. If the pesign-client specifies
+# a pair that isn't present in this configuration file, the request is rejected.
 [[keys]]
 # The name of the key in Sigul.
 key_name = "signing-key"
@@ -73,15 +114,20 @@ key_name = "signing-key"
 # The name of the certificate in Sigul.
 certificate_name = "codesigning"
 
-# The ID used in the systemd encrypted credential.
+# The path to a file containing the Sigul passphrase to access the key.
+#
+# It is expected to be the ID used in the systemd encrypted credential.
 passphrase_path = "sigul.signing-key.passphrase"
 
+# The certificate to validate the PE signature with; this field is optional.
+#
 # If set, the service will validate the PE has been signed with the given certificate
 # before returning the signed file to the client. This validation is done with the
-# "sbverify" application, which must be installed to use this option. This field is
-# optional.
+# "sbverify" application, which must be installed to use this option.
 certificate_file = "/path/to/signing/certificate.pem"
 
+
+# Additional signing keys can be specified.
 [[keys]]
 key_name = "other-signing-key"
 certificate_name = "other-codesigning"

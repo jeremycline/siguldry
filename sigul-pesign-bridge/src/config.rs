@@ -27,7 +27,13 @@ pub struct Config {
     /// The service will retry requests to the Sigul server until it succeeds or
     /// this timeout is reached, at which point it will signal to the pesign-client
     /// that the request failed.
-    pub request_timeout_secs: NonZeroU64,
+    pub total_request_timeout_secs: NonZeroU64,
+
+    /// The timeout (in seconds) to wait for a response from the Sigul server.
+    ///
+    /// Requests that time out are retried until `total_request_timeout_secs` is reached.
+    /// As such, this value should be several times smaller than `total_request_timeout_secs`.
+    pub sigul_request_timeout_secs: NonZeroU64,
 
     /// Configuration to connect to the Sigul server.
     pub sigul: Siguldry,
@@ -292,7 +298,9 @@ impl std::fmt::Display for Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            request_timeout_secs: NonZeroU64::new(60 * 2).expect("Don't set the default to 0"),
+            total_request_timeout_secs: NonZeroU64::new(60 * 10)
+                .expect("Don't set the default to 0"),
+            sigul_request_timeout_secs: NonZeroU64::new(60).expect("Don't set the default to 0"),
             keys: vec![Key::default()],
             sigul: Siguldry::default(),
         }

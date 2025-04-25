@@ -10,9 +10,11 @@
 
 use std::{
     io::Write,
+    net::TcpListener,
     path::PathBuf,
     process::{Command, Output, Stdio},
     sync::{Mutex, Once},
+    thread,
     time::Duration,
 };
 
@@ -30,7 +32,10 @@ static UMASK: Once = Once::new();
 // the tests to ensure one server is running at a time :(
 static SOCKET_PERMIT: Mutex<()> = Mutex::new(());
 
-fn run_command(mut client_command: Command) -> Result<(Output, Output)> {
+fn run_command(
+    mut client_command: Command,
+    service_config: Option<PathBuf>,
+) -> Result<(Output, Output)> {
     UMASK.call_once(|| {
         let mut umask = Mode::empty();
         umask.insert(Mode::S_IRWXO);
@@ -50,11 +55,13 @@ fn run_command(mut client_command: Command) -> Result<(Output, Output)> {
         .canonicalize()?;
     let creds_directory = repo_root.join("devel/creds/");
 
-    let config_file = if std::env::var("GITHUB_ACTIONS").is_ok_and(|val| val.contains("true")) {
-        repo_root.join("devel/github/config.toml")
-    } else {
-        repo_root.join("devel/local/config.toml")
-    };
+    let config_file = service_config.unwrap_or_else(|| {
+        if std::env::var("GITHUB_ACTIONS").is_ok_and(|val| val.contains("true")) {
+            repo_root.join("devel/github/config.toml")
+        } else {
+            repo_root.join("devel/local/config.toml")
+        }
+    });
 
     let mut server_command = Command::cargo_bin("sigul-pesign-bridge")?;
     server_command
@@ -107,6 +114,135 @@ fn run_command(mut client_command: Command) -> Result<(Output, Output)> {
     Ok((client_output, service_output))
 }
 
+// Assert the bridge handles the upstream Sigul server being unresponsive
+// and reports the failure to the client.
+#[test]
+fn signing_times_out() -> Result<()> {
+    let output_dir = tempfile::tempdir()?;
+    let out_file = output_dir.path().join("sample-uefi.signed.efi");
+    let mut in_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    in_file.push("../target/x86_64-unknown-uefi/debug/sample-uefi.efi");
+
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let server_address = listener.local_addr()?;
+    let _server_thread = thread::spawn(move || {
+        let mut conns = vec![];
+        for stream in listener.incoming() {
+            conns.push(stream);
+        }
+    });
+
+    let config_path = output_dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+                total_request_timeout_secs = 3
+                sigul_request_timeout_secs = 1
+
+                [sigul]
+                bridge_hostname = "localhost"
+                bridge_port = {}
+                server_hostname = "localhost"
+                sigul_user_name = "sigul-client"
+                private_key = "sigul.client.private_key.pem"
+                client_certificate = "sigul.client.certificate.pem"
+                ca_certificate = "sigul.ca_certificate.pem"
+
+                [[keys]]
+                key_name = "Sigul HSM Key"
+                certificate_name = "Secure Boot Code Signing Certificate"
+                passphrase_path = "sigul.signing-key-passphrase"
+            "#,
+            server_address.port()
+        ),
+    )?;
+
+    let mut client_command = Command::new("pesign-client");
+    client_command
+        .arg("--sign")
+        .arg("--token=Sigul HSM Key")
+        .arg("--certificate=Secure Boot Code Signing Certificate")
+        .arg(format!("--infile={}", in_file.as_path().display()))
+        .arg(format!("--outfile={}", &out_file.as_path().display()));
+    let (client_output, service_output) = run_command(client_command, Some(config_path))?;
+
+    assert!(!client_output.status.success());
+    assert_eq!(
+        "pesign-client: signing failed: \"\"\n",
+        String::from_utf8_lossy(&client_output.stderr)
+    );
+    assert!(service_output.status.success());
+    let service_logs = String::from_utf8_lossy(&service_output.stderr);
+    assert!(service_logs.contains("Sigul signing request timed out; retrying..."));
+
+    Ok(())
+}
+
+// Assert the bridge handles the abrupt disconnections from Sigul
+#[test]
+fn signing_hangs_up() -> Result<()> {
+    let output_dir = tempfile::tempdir()?;
+    let out_file = output_dir.path().join("sample-uefi.signed.efi");
+    let mut in_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    in_file.push("../target/x86_64-unknown-uefi/debug/sample-uefi.efi");
+
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let server_address = listener.local_addr()?;
+    let _server_thread = thread::spawn(move || {
+        for stream in listener.incoming() {
+            // Rudely hang up.
+            drop(stream);
+        }
+    });
+
+    let config_path = output_dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+                total_request_timeout_secs = 3
+                sigul_request_timeout_secs = 1
+
+                [sigul]
+                bridge_hostname = "localhost"
+                bridge_port = {}
+                server_hostname = "localhost"
+                sigul_user_name = "sigul-client"
+                private_key = "sigul.client.private_key.pem"
+                client_certificate = "sigul.client.certificate.pem"
+                ca_certificate = "sigul.ca_certificate.pem"
+
+                [[keys]]
+                key_name = "Sigul HSM Key"
+                certificate_name = "Secure Boot Code Signing Certificate"
+                passphrase_path = "sigul.signing-key-passphrase"
+            "#,
+            server_address.port()
+        ),
+    )?;
+
+    let mut client_command = Command::new("pesign-client");
+    client_command
+        .arg("--sign")
+        .arg("--token=Sigul HSM Key")
+        .arg("--certificate=Secure Boot Code Signing Certificate")
+        .arg(format!("--infile={}", in_file.as_path().display()))
+        .arg(format!("--outfile={}", &out_file.as_path().display()));
+    let (client_output, service_output) = run_command(client_command, Some(config_path))?;
+
+    assert!(!client_output.status.success());
+    assert_eq!(
+        "pesign-client: signing failed: \"\"\n",
+        String::from_utf8_lossy(&client_output.stderr)
+    );
+    assert!(service_output.status.success());
+    let service_logs = String::from_utf8_lossy(&service_output.stderr);
+    assert!(service_logs.contains("signing failed; retrying sigul request in 2 seconds"));
+
+    Ok(())
+}
+
 #[test]
 fn sign_attached() -> Result<()> {
     let output_dir = tempfile::tempdir()?;
@@ -121,7 +257,7 @@ fn sign_attached() -> Result<()> {
         .arg("--certificate=Secure Boot Code Signing Certificate")
         .arg(format!("--infile={}", in_file.as_path().display()))
         .arg(format!("--outfile={}", &out_file.as_path().display()));
-    let (client_output, service_output) = run_command(client_command)?;
+    let (client_output, service_output) = run_command(client_command, None)?;
 
     assert!(client_output.status.success());
     assert!(service_output.status.success());
@@ -174,7 +310,7 @@ fn unlock() -> Result<()> {
         .arg("--unlock")
         .arg(format!("--pinfile={}", pinfile.path().display()))
         .arg("--token=Test Cert DB");
-    let (client_output, service_output) = run_command(client_command)?;
+    let (client_output, service_output) = run_command(client_command, None)?;
 
     assert!(!client_output.status.success());
     assert_eq!(
@@ -195,7 +331,7 @@ fn unlock() -> Result<()> {
 fn kill() -> Result<()> {
     let mut client_command = Command::new("pesign-client");
     client_command.arg("--kill");
-    let (client_output, service_output) = run_command(client_command)?;
+    let (client_output, service_output) = run_command(client_command, None)?;
 
     assert!(!client_output.status.success());
     assert_eq!(

@@ -109,11 +109,11 @@ pub fn listen(
 /// Process a single client request.
 ///
 /// All requests are wrapped in a timeout to ensure they don't get stuck forever.
-/// This timeout is configurable via [`Config::request_timeout_secs`].
+/// This timeout is configurable via [`Config::total_request_timeout_secs`].
 #[instrument(skip_all, ret, fields(request_id = uuid::Uuid::now_v7().to_string()))]
 async fn request(context: super::Context, unix_stream: UnixStream) -> Result<(), anyhow::Error> {
     let result = tokio::time::timeout(
-        Duration::from_secs(context.config.request_timeout_secs.get()),
+        Duration::from_secs(context.config.total_request_timeout_secs.get()),
         request_handler(context, unix_stream),
     )
     .await;
@@ -141,16 +141,25 @@ async fn request_handler(
                         get_command_version(&mut unix_stream, request.payload_length).await
                     }
                     Command::SignAttachedWithFileType => {
-                        let result = sign_attached_with_filetype(
-                            &context,
-                            &mut unix_stream,
-                            request.payload_length,
+                        let result = tokio::time::timeout(
+                            Duration::from_secs_f64(
+                                context.config.total_request_timeout_secs.get() as f64 - 0.8,
+                            ),
+                            sign_attached_with_filetype(
+                                &context,
+                                &mut unix_stream,
+                                request.payload_length,
+                            ),
                         )
                         .await;
-                        let mut response: Bytes = Response::from(&result).into();
+                        let mut response: Bytes = match result {
+                            Ok(Ok(_)) => Response::Success,
+                            _ => Response::Failure,
+                        }
+                        .into();
                         unix_stream.write_all_buf(&mut response).await?;
 
-                        result
+                        result.unwrap_or_else(|_| Err(anyhow!("Request timed out!")))
                     }
                     _unsupported => {
                         // A well-behaved client should never do this: it queries for the command version
@@ -413,23 +422,25 @@ async fn sign_attached_with_filetype(
         Ok::<_, anyhow::Error>(sigul_input)
     }).await??;
 
-    tokio::time::timeout(
-        // Grant the service 500 milliseconds to send the final "we failed message"
-        Duration::from_secs_f64(context.config.request_timeout_secs.get() as f64 - 0.5),
-        async {
-            loop {
-                let input_stream = tokio::fs::File::open(&sigul_input)
-                    .await
-                    .with_context(|| format!("failed to read input file '{}'", &sigul_input.display()))?;
+    loop {
+        let request = tokio::time::timeout(
+            Duration::from_secs(context.config.sigul_request_timeout_secs.get()),
+            async {
+                let input_stream =
+                    tokio::fs::File::open(&sigul_input).await.with_context(|| {
+                        format!("failed to read input file '{}'", &sigul_input.display())
+                    })?;
                 let output_stream = tokio::fs::OpenOptions::new()
                     .write(true)
                     .truncate(true)
                     .create(true)
                     .open(&sigul_output)
                     .await
-                    .with_context(|| format!("failed to open output file '{}'", &sigul_output.display()))?;
+                    .with_context(|| {
+                        format!("failed to open output file '{}'", &sigul_output.display())
+                    })?;
 
-                match context
+                context
                     .sigul_client
                     .sign_pe(
                         input_stream,
@@ -438,22 +449,28 @@ async fn sign_attached_with_filetype(
                         key.key_name.clone(),
                         key.certificate_name.clone(),
                     )
-                    .await {
-                    Ok(_) => break Ok::<_, anyhow::Error>(()),
-                    Err(ClientError::Connection(error)) => {
-                        tracing::warn!(%error, "signing failed; retrying sigul client in 2 seconds");
-                        tokio::time::sleep(Duration::from_secs(2)).await;
-                    }
-                    Err(error) => {
-                        tracing::error!(%error, "signing failed due to an unrecoverable error");
-                        return Err(error.into());
-                    },
-                }
+                    .await
+            },
+        )
+        .await;
+
+        match request {
+            Ok(Ok(_)) => {
+                break;
             }
-        },
-    )
-    .await
-    .context("Timeout reached while waiting for Sigul")?.context("Signing via sigual was unsuccessful")?;
+            Ok(Err(ClientError::Connection(error))) => {
+                tracing::warn!(%error, "signing failed; retrying sigul request in 2 seconds");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            Ok(Err(error)) => {
+                tracing::error!(%error, "signing failed due to an unrecoverable error");
+                return Err(error.into());
+            }
+            Err(_error) => {
+                tracing::warn!("Sigul signing request timed out; retrying...");
+            }
+        }
+    }
 
     if let Some(signing_cert) = &key.certificate_file {
         tracing::info!("Certificate file is provided for this key; validating with 'sbverify'");
@@ -663,7 +680,7 @@ mod tests {
         let socket_dir = tempfile::tempdir()?;
         let socket_path = socket_dir.path().join("socket");
         let mut config = config();
-        config.request_timeout_secs = NonZeroU64::new(1).unwrap();
+        config.total_request_timeout_secs = NonZeroU64::new(1).unwrap();
         let context = Context::new(config, socket_dir.path().to_path_buf())?;
         let cancel_token = CancellationToken::new();
 
