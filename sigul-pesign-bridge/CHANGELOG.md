@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.0] - Unreleased
+## [0.4.0] - 2025-05-05
 
 ### Changed
 
@@ -14,8 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an individual request is terminated. The sigul request timeout is the amount of time the
   bridge will wait for a Sigul request to succeed before canceling and retrying (#36)
 
-- The default valud of `total_request_timeout_secs` (previously `request_timeout_secs`) is now
+- The default value of `total_request_timeout_secs` (previously `request_timeout_secs`) is now
   600 seconds and matches the documented default in `config.toml.example` (#36)
+
 
 ## [0.3.1] - 2025-03-24
 
