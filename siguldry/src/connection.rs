@@ -226,11 +226,16 @@ pub(crate) struct InnerConnection {
 impl Connection<state::New> {
     /// Open a new connection to the Sigul bridge.
     #[instrument(err, skip_all)]
-    pub async fn connect<A: ToSocketAddrs>(addr: A, ssl: Ssl) -> Result<Self, Error> {
+    pub async fn connect<A: ToSocketAddrs + std::fmt::Debug>(
+        addr: A,
+        ssl: Ssl,
+    ) -> Result<Self, Error> {
         let response_signing_keys = HmacKeys::new()?;
-        let stream = TcpStream::connect(addr).await?;
+        let stream = TcpStream::connect(&addr).await?;
+        tracing::info!(?addr, "TCP connection to the Sigul bridge established");
         let mut stream = tokio_openssl::SslStream::new(ssl, stream)?;
         Pin::new(&mut stream).connect().await?;
+        tracing::info!("TLS session with the Sigul bridge established");
 
         Ok(Connection {
             stream,
