@@ -20,9 +20,9 @@ use std::{
 
 use anyhow::{anyhow, Result};
 use assert_cmd::cargo::CommandCargoExt;
-use nix::sys::{
-    signal::{self, Signal},
-    stat::Mode,
+use rustix::{
+    fs::Mode,
+    process::{kill_process, Pid},
 };
 use tempfile::NamedTempFile;
 
@@ -38,8 +38,8 @@ fn run_command(
 ) -> Result<(Output, Output)> {
     UMASK.call_once(|| {
         let mut umask = Mode::empty();
-        umask.insert(Mode::S_IRWXO);
-        nix::sys::stat::umask(umask);
+        umask.insert(Mode::RWXO);
+        rustix::process::umask(umask);
     });
     let _socket_permit = SOCKET_PERMIT.lock().unwrap();
 
@@ -104,7 +104,10 @@ fn run_command(
         String::from_utf8_lossy(&client_output.stderr)
     );
 
-    signal::kill(nix::unistd::Pid::from_raw(service_id), Signal::SIGTERM)?;
+    kill_process(
+        Pid::from_raw(service_id).unwrap(),
+        rustix::process::Signal::TERM,
+    )?;
     let service_output = service.join().unwrap()?;
     println!(
         "service_stderr: {}",

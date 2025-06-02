@@ -8,7 +8,6 @@ use std::{
 
 use anyhow::Result;
 use assert_cmd::cargo::CommandCargoExt;
-use nix::sys::stat::Mode;
 
 #[test]
 fn stops_world_readable() -> Result<()> {
@@ -16,7 +15,7 @@ fn stops_world_readable() -> Result<()> {
     let mut creds_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     creds_directory.push("../devel/creds/");
 
-    nix::sys::stat::umask(Mode::empty());
+    rustix::process::umask(rustix::fs::Mode::empty());
     let mut command = Command::cargo_bin("sigul-pesign-bridge")?;
     let output = command
         .env("SIGUL_PESIGN_BRIDGE_LOG", "trace")

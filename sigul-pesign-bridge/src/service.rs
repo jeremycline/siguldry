@@ -12,23 +12,13 @@
 
 use std::{
     fs::File,
-    io::{self, IoSliceMut},
-    os::{
-        fd::{AsFd, AsRawFd, FromRawFd, RawFd},
-        unix::fs::PermissionsExt,
-    },
+    io,
+    os::{fd::AsFd, unix::fs::PermissionsExt},
     time::Duration,
 };
 
 use anyhow::{anyhow, Context as AnyhowContext};
 use bytes::Bytes;
-use nix::{
-    cmsg_space,
-    sys::{
-        socket::{ControlMessageOwned, MsgFlags, UnixAddr},
-        stat::Mode,
-    },
-};
 use siguldry::error::ClientError;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -59,7 +49,7 @@ pub fn listen(
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("Failed to bind to {}", &socket_path.display()))?;
     let metadata = std::fs::metadata(&socket_path)?;
-    if metadata.permissions().mode() & Mode::S_IRWXO.bits() != 0 {
+    if metadata.permissions().mode() & rustix::fs::Mode::RWXO.bits() != 0 {
         tracing::error!(mode=?metadata.permissions(), "Service socket has dangerous permissions!");
         std::fs::remove_file(&socket_path)
             .with_context(|| format!("Failed to remove socket {}", &socket_path.display()))?;
@@ -141,15 +131,21 @@ async fn request_handler(
                         get_command_version(&mut unix_stream, request.payload_length).await
                     }
                     Command::SignAttachedWithFileType => {
+                        let mut payload = vec![0_u8; request.payload_length];
+                        unix_stream.read_exact(&mut payload).await?;
+                        tracing::trace!(?request.payload_length, ?payload, "Read payload");
+
+                        let sign_request = SignAttachedRequest::try_from(payload.as_slice())?;
+                        tracing::info!(?sign_request.token_name, ?sign_request.certificate_name, "Client signing request received");
+
+                        let (stream, pesign_files) = get_files_from_conn(unix_stream).await?;
+                        unix_stream = stream;
+
                         let result = tokio::time::timeout(
                             Duration::from_secs_f64(
                                 context.config.total_request_timeout_secs.get() as f64 - 0.8,
                             ),
-                            sign_attached_with_filetype(
-                                &context,
-                                &mut unix_stream,
-                                request.payload_length,
-                            ),
+                            sign_attached_with_filetype(&context, pesign_files, sign_request),
                         )
                         .await;
                         let mut response: Bytes = match result {
@@ -258,31 +254,32 @@ impl From<[File; 2]> for PesignFiles {
 // Helper to get the file descriptors pesign-client sends over the Unix socket.
 //
 // Both the Rust standard library and tokio don't include support for ancillary data
-// over Unix sockets. Instead, we use the nix library's blocking interface to retrieve
+// over Unix sockets. Instead, we use the rustix library's blocking interface to retrieve
 // the file descriptors from the client.
 //
 // https://github.com/rust-lang/rust/issues/76915
-async fn get_files_from_conn(connection: &mut UnixStream) -> anyhow::Result<PesignFiles> {
-    let raw_fd = connection.as_fd().as_raw_fd();
+async fn get_files_from_conn(connection: UnixStream) -> anyhow::Result<(UnixStream, PesignFiles)> {
     let span = tracing::Span::current();
-    tokio::task::spawn_blocking(move || {
+    let (connection, pesign_files) = tokio::task::spawn_blocking(move || {
         let _entered = span.enter();
-        let mut cmsgs = vec![];
+        let mut files: Vec<File> = vec![];
 
         // First one is fdin, second is fdout
         let mut tries = 0;
-        while cmsgs.len() < 2 {
+        while files.len() < 2 {
             let mut buf = [0_u8; 2];
-            let mut b = [IoSliceMut::new(&mut buf)];
-            let mut cmsg_buffer = cmsg_space!([RawFd; 1]);
-            let result = match nix::sys::socket::recvmsg::<UnixAddr>(
-                raw_fd,
-                &mut b,
-                Some(&mut cmsg_buffer),
-                MsgFlags::MSG_WAITALL,
+            let mut iov = [rustix::io::IoSliceMut::new(&mut buf)];
+            let mut space = [std::mem::MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+            let mut cmsg_buffer = rustix::net::RecvAncillaryBuffer::new(&mut space);
+
+            let result = match rustix::net::recvmsg(
+                connection.as_fd(),
+                &mut iov,
+                &mut cmsg_buffer,
+                rustix::net::RecvFlags::WAITALL,
             ) {
                 Ok(message) => message,
-                Err(nix::errno::Errno::EAGAIN) => {
+                Err(rustix::io::Errno::AGAIN) => {
                     if tries > 10 {
                         return Err(anyhow!(
                             "Timed out waiting for client to send file descriptors to sign"
@@ -298,71 +295,46 @@ async fn get_files_from_conn(connection: &mut UnixStream) -> anyhow::Result<Pesi
                     return Err(anyhow!("Failed to read client request: {:?}", error));
                 }
             };
-            let mut cmsg = result
-                .cmsgs()
-                .context("Not enough space was allocated for control messages")?
-                .collect::<Vec<_>>();
-            tracing::debug!(
-                ?cmsg,
-                "Read control message from client with file descriptor"
-            );
-            cmsgs.append(&mut cmsg);
+            if !result.flags.is_empty() {
+                return Err(anyhow!("Received message with flags: {:?}", result.flags));
+            }
+
+            match cmsg_buffer
+                .drain()
+                .next()
+                .ok_or_else(|| anyhow!("No control message received"))?
+            {
+                rustix::net::RecvAncillaryMessage::ScmRights(ancillary_iter) => {
+                    let fd = ancillary_iter
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| anyhow!("No file descriptor received"))?;
+                    files.push(fd.into());
+                }
+                _ => return Err(anyhow!("Unexpected ancillary message from pesign-client")),
+            }
 
             // We don't expect any more data beyond the file descriptors so if there's any non-null bytes
             // something has changed.
-            if result.iovs().flatten().any(|b| *b != 0) {
-                tracing::error!("Unexpected non-null data found with control message; aborting");
-                return Err(anyhow!("Unexpected data provided by the client"));
-            }
-        }
-
-        convert_cmsgs_to_files(cmsgs)
-    })
-    .await?
-}
-
-// Take the control messages and convert the raw file descriptors to [`PesignFiles`].
-fn convert_cmsgs_to_files(cmsgs: Vec<ControlMessageOwned>) -> anyhow::Result<PesignFiles> {
-    let mut files = vec![];
-    for cmsg in cmsgs {
-        match cmsg {
-            nix::sys::socket::ControlMessageOwned::ScmRights(fds) => {
-                if fds.len() != 1 {
-                    return Err(anyhow!("Unexpected number of file descriptors sent"));
+            for io_slice in iov {
+                if io_slice.iter().any(|b| *b != 0) {
+                    tracing::error!(
+                        "Unexpected non-null data found with control message; aborting"
+                    );
+                    return Err(anyhow!("Unexpected data provided by the client"));
                 }
-
-                let file = fds
-                    .first()
-                    .map(|fd| {
-                        let raw_fd = RawFd::from(*fd);
-
-                        // Do our best to check this is a valid descriptor
-                        let flags = nix::fcntl::fcntl(raw_fd, nix::fcntl::F_GETFL)
-                            .context("Client passed invalid file descriptor")?;
-                        tracing::debug!(
-                            "Client sent file descriptor {raw_fd} with flags: {flags:#o}"
-                        );
-
-                        // SAFETY:
-                        // The file descriptor has been passed to us from the Unix socket and we own
-                        // the descriptor. We've done what we can to ensure the descriptor is, in
-                        // fact, valid.
-                        Ok::<_, anyhow::Error>(unsafe { File::from_raw_fd(raw_fd) })
-                    })
-                    .ok_or(anyhow!(
-                        "Programmer error: there should be 1 file descriptor"
-                    ))??;
-
-                files.push(file);
             }
-            _ => return Err(anyhow!("Unexpected control message received")),
         }
-    }
 
-    let files: [File; 2] = files
-        .try_into()
-        .map_err(|error| anyhow!("Client did not send the expected number of files: {error:?}"))?;
-    Ok(files.into())
+        let files: [File; 2] = files.try_into().map_err(|error| {
+            anyhow!("Client did not send the expected number of files: {error:?}")
+        })?;
+        let pesign_files: PesignFiles = files.into();
+        Ok((connection, pesign_files))
+    })
+    .await??;
+
+    Ok((connection, pesign_files))
 }
 
 /// Handle signing requests from the pesign-client.
@@ -381,19 +353,10 @@ fn convert_cmsgs_to_files(cmsgs: Vec<ControlMessageOwned>) -> anyhow::Result<Pes
 #[instrument(skip_all, ret)]
 async fn sign_attached_with_filetype(
     context: &super::Context,
-    connection: &mut UnixStream,
-    payload_length: usize,
+    mut pesign_files: PesignFiles,
+    request: SignAttachedRequest,
 ) -> Result<(), anyhow::Error> {
-    let mut payload = vec![0_u8; payload_length];
-    connection.read_exact(&mut payload).await?;
-    tracing::trace!(?payload_length, ?payload, "Read payload");
-
-    let request = SignAttachedRequest::try_from(payload.as_slice())?;
-    tracing::info!(?request.token_name, ?request.certificate_name, "Client signing request received");
-
     let key = request.key(&context.config.keys)?;
-    let mut pesign_files = get_files_from_conn(connection).await?;
-
     let temp_dir = tempfile::Builder::new()
         .prefix(".work")
         .rand_bytes(16)
@@ -529,7 +492,7 @@ mod tests {
 
     use anyhow::{anyhow, Result};
     use bytes::{BufMut, Bytes, BytesMut};
-    use nix::sys::stat::Mode;
+    use rustix::fs::Mode;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_util::sync::CancellationToken;
     use zerocopy::IntoBytes;
@@ -544,8 +507,8 @@ mod tests {
     fn set_umask() {
         UMASK.call_once(|| {
             let mut umask = Mode::empty();
-            umask.insert(Mode::S_IRWXO);
-            nix::sys::stat::umask(umask);
+            umask.insert(Mode::RWXO);
+            rustix::process::umask(umask);
         });
     }
 
