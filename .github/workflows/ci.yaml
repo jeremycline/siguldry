@@ -62,12 +62,10 @@ jobs:
     strategy:
       matrix:
         # Support current stable and the toolchain that ships with
-        # the latest RHEL 9 minor release. 9.5 targets 1.79, and
-        # 9.6 targets 1.84
+        # the latest RHEL 9 minor release. 9.6 targets 1.84.
         #
-        # https://issues.redhat.com/browse/RHEL-30070
         # https://issues.redhat.com/browse/RHEL-61964
-        rust-toolchain: [stable, "1.79"]
+        rust-toolchain: [stable, "1.84"]
     steps:
       - uses: actions/checkout@v4
         with:

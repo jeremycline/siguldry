@@ -9,6 +9,6 @@ members = [
 
 [workspace.package]
 # This targets the latest Enterprise Linux Rust version.
-rust-version = "1.79"
+rust-version = "1.84"
 edition = "2021"
 license = "MIT"
