@@ -106,7 +106,7 @@ jobs:
 
   integration-tests:
     name: Integration tests
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     container: quay.io/jeremycline/sigul-pesign-bridge-ci:2025-04-24
     services:
       sigul-bridge:
@@ -115,6 +115,11 @@ jobs:
           RUN_SIGUL_BRIDGE: true
         volumes:
           - ./devel/github:/etc/sigul
+        options: >-
+          --health-cmd "ss -o state established '( sport = :44333 )' && ss -lnt '( sport = :44334 )'"
+          --health-timeout 3s
+          --health-interval 5s
+          --health-retries 5
 
       sigul-server:
         image: quay.io/jeremycline/sigul-pesign-bridge-ci:2025-04-24
@@ -122,6 +127,11 @@ jobs:
           RUN_SIGUL_SERVER: true
         volumes:
           - ./devel/github:/etc/sigul
+        options: >-
+          --health-cmd "ss -tn -o state established '( dport = :44333 )'"
+          --health-timeout 3s
+          --health-interval 5s
+          --health-retries 5
 
     steps:
       - uses: actions/checkout@v4
