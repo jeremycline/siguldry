@@ -12,7 +12,7 @@
 FROM quay.io/almalinuxorg/almalinux:9
 
 RUN dnf install -y epel-release
-RUN dnf install -y --enablerepo=epel-testing \
+RUN dnf install -y \
     cargo \
     gcc \
     iproute \

@@ -107,10 +107,10 @@ jobs:
   integration-tests:
     name: Integration tests
     runs-on: ubuntu-latest
-    container: quay.io/jeremycline/sigul-pesign-bridge-ci:2025-04-24
+    container: quay.io/jeremycline/sigul-pesign-bridge-ci:2025-06-02
     services:
       sigul-bridge:
-        image: quay.io/jeremycline/sigul-pesign-bridge-ci:2025-04-24
+        image: quay.io/jeremycline/sigul-pesign-bridge-ci:2025-06-02
         env:
           RUN_SIGUL_BRIDGE: true
         volumes:
@@ -122,7 +122,7 @@ jobs:
           --health-retries 5
 
       sigul-server:
-        image: quay.io/jeremycline/sigul-pesign-bridge-ci:2025-04-24
+        image: quay.io/jeremycline/sigul-pesign-bridge-ci:2025-06-02
         env:
           RUN_SIGUL_SERVER: true
         volumes:
