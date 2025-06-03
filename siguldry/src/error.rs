@@ -7,6 +7,28 @@
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ClientError {
+    /// Returned in the event that the Sigul server responds with a non-zero status code.
+    #[error("the sigul server replied with an error: {0}")]
+    Sigul(#[from] Sigul),
+
+    /// Returned in the event that a request could not be serialized, or
+    /// if a Sigul response could not be deserialized.
+    ///
+    /// Repeating the operation that led to this error will not succeed.
+    #[error("failed to serialize to or deserialize from sigul: {0}")]
+    Serde(#[from] crate::serdes::Error),
+
+    /// The HMAC on the Sigul server's header or payload was incorrect,
+    /// and its responses may have been tampered with (or corrupted) by
+    /// the Sigul bridge.
+    ///
+    /// It's possible retrying the request will result in success in the
+    /// unlikely event that a bit flipped somewhere along the way, but is
+    /// also likely to fail with this error again if something more
+    /// nefarious is occurring.
+    #[error("the Sigul server signature on its response was invalid")]
+    InvalidSignature,
+
     /// Returned in the event that an error occurred while communicating with the Sigul bridge or
     /// Sigul server. This may be a result of a transient networking problem, or because of a more
     /// permanent issue such and invalid configuration, or event a client bug.
@@ -140,13 +162,6 @@ impl From<u32> for Sigul {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ConnectionError {
-    /// Returned in the event that a request could not be serialized, or
-    /// if a Sigul response could not be deserialized.
-    ///
-    /// Repeating the operation that led to this error will not succeed.
-    #[error("failed to serialize to or deserialize from sigul: {0}")]
-    Serde(#[from] crate::serdes::Error),
-
     /// An I/O occurred.
     ///
     /// This is very likely due to temporary networking issues and the operation
@@ -156,10 +171,6 @@ pub enum ConnectionError {
     /// port is incorrect, in which case retrying will never succeed.
     #[error("an I/O error occurred: {0}")]
     Io(#[from] std::io::Error),
-
-    /// Returned in the event that the Sigul server responds with a non-zero status code.
-    #[error("the sigul server replied with an error: {0}")]
-    Sigul(#[from] Sigul),
 
     /// An OpenSSL error occurred.
     ///
@@ -180,21 +191,12 @@ pub enum ConnectionError {
     #[error("an SSL error occurred: {0}")]
     Ssl(#[from] openssl::ssl::Error),
 
-    /// The HMAC on the Sigul server's header or payload was incorrect,
-    /// and its responses may have been tampered with (or corrupted) by
-    /// the Sigul bridge.
+    /// A Sigul protocol violation occurred.
     ///
-    /// It's possible retrying the request will result in success in the
-    /// unlikely event that a bit flipped somewhere along the way, but is
-    /// also likely to fail with this error again if something more
-    /// nefarious is occurring.
-    #[error("the Sigul server signature on its response was invalid")]
-    InvalidSignature,
-
-    /// Generic error that indicates a fatal error, likely due to a bug in the connection
-    /// implementation.
+    /// The primary case for this is if a chunk for the outer TLS session arrives
+    /// while the inner TLS session is active.
     ///
-    /// Retrying the operation will not help, and this should be reported as bug.
-    #[error(transparent)]
-    Fatal(#[from] anyhow::Error),
+    /// Retrying might succeed, but this is a bug and should be reported.
+    #[error("a Sigul protocol violation occurred: {0}")]
+    ProtocolViolation(String),
 }

@@ -4,3 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.3.0] - Unreleased
+
+### Added
+
+- The library now logs when the TCP connection is established before attempting
+  to negotiate the TLS session (#43).
+
+- Added support for the 'user-info' command to the siguldry client (#32)
+
+- Added support for the 'new-user' and 'delete-user' commands to the siguldry client (#46)
+
+### Changed
+
+- The minimum supported Rust version (MSRV) is now 1.84 to align with RHEL 9.6 and 10.0 (#45)
+
+- **Breaking change**: Several error variants have been moved from `siguldry::error::ConnectionError`
+  to `siguldry::error::ClientError`. As `ConnectionError` is a variant of `ClientError`, this reduces
+  the amount of nested error type matching required. The variants are: `Sigul`, `Serde`, and `InvalidSignature` (#46)
+
+- **Breaking change**: The `ConnectionError::Fatal` variant has been replaced with `ConnectionError::ProtocolViolation` (#46)

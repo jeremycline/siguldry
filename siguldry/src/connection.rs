@@ -154,7 +154,11 @@ impl HmacKeys {
     }
 
     /// Validate header data against the provided HMAC signature.
-    fn validate_header(&self, data: &[u8], signature: &[u8]) -> Result<(), Error> {
+    fn validate_header(
+        &self,
+        data: &[u8],
+        signature: &[u8],
+    ) -> Result<(), crate::error::ClientError> {
         let key = openssl::pkey::PKey::hmac(&self.header_key)?;
         let mut signer = openssl::sign::Signer::new(MessageDigest::sha512(), &key)?;
         signer.update(data)?;
@@ -164,7 +168,7 @@ impl HmacKeys {
             Ok(())
         } else {
             tracing::error!("HMAC signature on response headers failed!");
-            Err(Error::InvalidSignature)
+            Err(crate::error::ClientError::InvalidSignature)
         }
     }
 
@@ -179,14 +183,14 @@ impl HmacKeys {
     fn validate_payload_signer(
         signer: openssl::sign::Signer,
         signature: &[u8],
-    ) -> Result<(), Error> {
+    ) -> Result<(), crate::error::ClientError> {
         let hmac = signer.sign_to_vec()?;
         if openssl::memcmp::eq(&hmac, signature) {
             tracing::debug!("HMAC signature validated on response payload");
             Ok(())
         } else {
             tracing::error!("HMAC signature on response payload failed!");
-            Err(Error::InvalidSignature)
+            Err(crate::error::ClientError::InvalidSignature)
         }
     }
 }
@@ -252,7 +256,7 @@ impl Connection<state::New> {
         mut self,
         command: Command,
         mut payload: Option<P>,
-    ) -> Result<InnerConnection, Error> {
+    ) -> Result<InnerConnection, crate::error::ClientError> {
         let operation_bytes = crate::serdes::to_bytes(&command)?;
         let mut outer_header_hash = openssl::hash::Hasher::new(MessageDigest::sha512())?;
         // The header digest must include the protocol version bytes.
@@ -356,7 +360,7 @@ impl InnerConnection {
         self,
         ssl: Ssl,
         mut request: HashMap<&str, &[u8]>,
-    ) -> Result<Connection<state::InnerFinished>, Error> {
+    ) -> Result<Connection<state::InnerFinished>, crate::error::ClientError> {
         // Include the outer request header and payload digests, along with a set of private keys used
         // for HMAC on server responses. Since the server responses in the outer TLS stream, these serve
         // to ensure the bridge is not meddling with the responses.
@@ -421,10 +425,10 @@ impl Connection<state::InnerFinished> {
     ///
     /// </div>
     #[instrument(err, skip_all, level = "debug")]
-    pub async fn response<P: AsyncWrite + AsyncWriteExt + Unpin>(
+    pub(crate) async fn response<P: AsyncWrite + AsyncWriteExt + Unpin>(
         mut self,
         mut payload: P,
-    ) -> Result<Response, Error> {
+    ) -> Result<Response, crate::error::ClientError> {
         // Assumption: this chunk includes the entire response header.
         //
         // This is how Sigul 1.2 works, but there's nothing in the protocol that necessarily

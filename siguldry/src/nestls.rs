@@ -9,7 +9,6 @@
 
 use std::pin::Pin;
 
-use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
 use openssl::ssl::Ssl;
 use tokio::{
@@ -74,9 +73,9 @@ impl Nestls {
         // as this closes DuplexStream. Failing to do so causes the task to hang indefinitely.
         drop(self.inner_stream);
         let framing_task = self.framing_task;
-        framing_task
-            .await
-            .context("the task framing the inner TLS session panicked")?
+        framing_task.await.map_err(|err| {
+            Error::ProtocolViolation(format!("Sigul connection framing failed: {err:?}"))
+        })?
     }
 
     /// This task takes ownership of the outer TLS session, which is what we write to
@@ -144,10 +143,9 @@ impl Nestls {
                     // handle it here. It's also entirely possible the author misunderstood the
                     // Python implementation, in which case this must be adjusted to split out the
                     // traffic.
-                    return Err(anyhow::anyhow!(
-                        "outer TLS data receieved while inner TLS session is active",
-                    )
-                    .into());
+                    return Err(Error::ProtocolViolation(
+                        "outer TLS data receieved while inner TLS session is active".to_string(),
+                    ));
                 }
             };
 

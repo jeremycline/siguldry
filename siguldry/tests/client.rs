@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use siguldry::error::{ClientError, ConnectionError, Sigul};
+use siguldry::error::{ClientError, Sigul};
 
 fn get_client() -> siguldry::client::Client {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -45,7 +45,7 @@ async fn list_users() -> anyhow::Result<()> {
     let client = get_client();
     let users = client.users("my-admin-password".into()).await?;
 
-    assert_eq!(users, vec!["sigul-client"]);
+    assert!(users.contains(&"sigul-client".to_string()));
     Ok(())
 }
 
@@ -67,11 +67,11 @@ async fn get_user_does_not_exist() -> anyhow::Result<()> {
     let user = client
         .get_user("my-admin-password".into(), "not-sigul-client".to_string())
         .await;
-    if let Err(ClientError::Connection(ConnectionError::Sigul(Sigul::UserNotFound))) = user {
-        // This is obviously a terrible error structure
-    } else {
-        panic!("Expected a Sigul error, got {:?}", user)
+    match user {
+        Err(ClientError::Sigul(Sigul::UserNotFound)) => {}
+        _ => panic!("Expected a Sigul error, got {:?}", user),
     }
+
     Ok(())
 }
 
@@ -81,8 +81,7 @@ async fn get_user_invalid_password() -> anyhow::Result<()> {
     let user = client
         .get_user("not-my-admin-password".into(), "sigul-client".to_string())
         .await;
-    if let Err(ClientError::Connection(ConnectionError::Sigul(Sigul::AuthenticationFailed))) = user
-    {
+    if let Err(ClientError::Sigul(Sigul::AuthenticationFailed)) = user {
         // This is obviously a terrible error structure
     } else {
         panic!("Expected a Sigul error, got {:?}", user)
