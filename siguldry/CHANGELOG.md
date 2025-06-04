@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added support for the 'new-user', 'modify-user', and 'delete-user' commands to the siguldry client (#46)
 
+- Added support for the full suite of key management commands to the siguldry client. These include
+'key-user-info', 'modify-key-user', 'list-keys', 'new-key', 'import-key', 'delete-key',
+'modify-key', 'list-key-users', 'grant-key-access', 'revoke-key-access', change-key-expiration',
+'get-public-key', 'change-passphrase', and 'list-binding-methods' (#47)
+
 ### Changed
 
 - The minimum supported Rust version (MSRV) is now 1.84 to align with RHEL 9.6 and 10.0 (#45)

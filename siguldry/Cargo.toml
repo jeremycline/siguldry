@@ -67,6 +67,15 @@ proptest = "1.6"
 version = "0.25"
 features = ["auto-initialize"]
 
+# As we use OpenSSL for the TLS connection, let's stick with it for this as well.
+# The upstream default engine is nettle.
+#
+# Bump to 2.0 once Rust 1.85 is available (November 2025)
+[dev-dependencies.sequoia-openpgp]
+version = "1"
+default-features = false
+features = ["crypto-openssl"]
+
 
 [[bin]]
 name = "siguldry-client"
