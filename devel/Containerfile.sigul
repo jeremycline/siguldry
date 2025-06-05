@@ -70,5 +70,8 @@ RUN mkdir ~/.sigul/ && cp -r /var/lib/sigul ~/.sigul/sigul
 # Set up a software HSM with Secure Boot keys to use in the Sigul server
 RUN setup_hsm
 
+# fix the ownership of /var/lib/sigul/gnupg
+RUN chown -R sigul:sigul /var/lib/sigul/gnupg
+
 # A hacky work-around for GitHub actions not letting you specify the entrypoint for a container
 ENTRYPOINT /usr/local/bin/sigul_wrapper
