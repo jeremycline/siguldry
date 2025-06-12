@@ -66,6 +66,16 @@ ca_certificate = "sigul.ca_certificate.pem"
 # and `--certificate` arguments respectively. If the pesign-client specifies
 # a pair that isn't present in this configuration file, the request is rejected.
 [[keys]]
+# The token name that pesign-client provides; it will be mapped to the
+# `key_name` field when passed to sigul. For example, if pesign-client
+# asks for "OpenSC Card" and the key name in Sigul is "fedora-signer",
+# set `pesign_token_name` to "OpenSC Card" and `key_name` to "fedora-signer".
+pesign_token_name = "OpenSC Card"
+
+# The certificate name that pesign-client provides; it will be mapped to
+# the `certificate_name` field just like `pesign_token_name` is mapped.
+pesign_certificate_name = "some certificate"
+
 # The name of the key in Sigul.
 key_name = "signing-key"
 

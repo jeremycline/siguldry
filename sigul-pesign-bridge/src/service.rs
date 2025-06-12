@@ -357,6 +357,7 @@ async fn sign_attached_with_filetype(
     request: SignAttachedRequest,
 ) -> Result<(), anyhow::Error> {
     let key = request.key(&context.config.keys)?;
+    tracing::debug!(?key, "signing request mapped to a known key");
     let temp_dir = tempfile::Builder::new()
         .prefix(".work")
         .rand_bytes(16)

@@ -107,6 +107,14 @@ impl Default for Siguldry {
 /// [`Config`], its request is rejected.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Key {
+    /// The token name that pesign-client provides; it will be mapped to the
+    /// `key_name` field when passed to sigul. For example, if pesign-client
+    /// asks for "OpenSC Card" and the key name in Sigul is "fedora-signer",
+    /// set `pesign_token_name` to "OpenSC Card" and `key_name` to "fedora-signer".
+    pub pesign_token_name: String,
+    /// The certificate name that pesign-client provides; it will be mapped to
+    /// the `certificate_name` field just like `pesign_token_name` is mapped.
+    pub pesign_certificate_name: String,
     /// The name of the key in the Sigul server.
     pub key_name: String,
     /// The name of the certificate in the Sigul server.
@@ -125,6 +133,8 @@ pub struct Key {
 impl Default for Key {
     fn default() -> Self {
         Self {
+            pesign_token_name: "OpenSC Card".to_string(),
+            pesign_certificate_name: "some-signing-certificate".to_string(),
             key_name: "signing-key".to_string(),
             certificate_name: "codesigning".to_string(),
             passphrase_path: PathBuf::from("sigul.signing-key-passphrase"),

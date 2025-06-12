@@ -153,6 +153,8 @@ fn signing_times_out() -> Result<()> {
                 ca_certificate = "sigul.ca_certificate.pem"
 
                 [[keys]]
+                pesign_token_name = "OpenSC Card"
+                pesign_certificate_name = "whatever pesign asked for"
                 key_name = "Sigul HSM Key"
                 certificate_name = "Secure Boot Code Signing Certificate"
                 passphrase_path = "sigul.signing-key-passphrase"
@@ -164,8 +166,8 @@ fn signing_times_out() -> Result<()> {
     let mut client_command = Command::new("pesign-client");
     client_command
         .arg("--sign")
-        .arg("--token=Sigul HSM Key")
-        .arg("--certificate=Secure Boot Code Signing Certificate")
+        .arg("--token=OpenSC Card")
+        .arg("--certificate=whatever pesign asked for")
         .arg(format!("--infile={}", in_file.as_path().display()))
         .arg(format!("--outfile={}", &out_file.as_path().display()));
     let (client_output, service_output) = run_command(client_command, Some(config_path))?;
@@ -217,6 +219,8 @@ fn signing_hangs_up() -> Result<()> {
                 ca_certificate = "sigul.ca_certificate.pem"
 
                 [[keys]]
+                pesign_token_name = "OpenSC Card"
+                pesign_certificate_name = "whatever pesign asked for"
                 key_name = "Sigul HSM Key"
                 certificate_name = "Secure Boot Code Signing Certificate"
                 passphrase_path = "sigul.signing-key-passphrase"
@@ -228,8 +232,8 @@ fn signing_hangs_up() -> Result<()> {
     let mut client_command = Command::new("pesign-client");
     client_command
         .arg("--sign")
-        .arg("--token=Sigul HSM Key")
-        .arg("--certificate=Secure Boot Code Signing Certificate")
+        .arg("--token=OpenSC Card")
+        .arg("--certificate=whatever pesign asked for")
         .arg(format!("--infile={}", in_file.as_path().display()))
         .arg(format!("--outfile={}", &out_file.as_path().display()));
     let (client_output, service_output) = run_command(client_command, Some(config_path))?;
@@ -256,8 +260,8 @@ fn sign_attached() -> Result<()> {
     let mut client_command = Command::new("pesign-client");
     client_command
         .arg("--sign")
-        .arg("--token=Sigul HSM Key")
-        .arg("--certificate=Secure Boot Code Signing Certificate")
+        .arg("--token=OpenSC Card")
+        .arg("--certificate=whatever pesign asked for")
         .arg(format!("--infile={}", in_file.as_path().display()))
         .arg(format!("--outfile={}", &out_file.as_path().display()));
     let (client_output, service_output) = run_command(client_command, None)?;

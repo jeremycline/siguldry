@@ -256,7 +256,8 @@ impl SignAttachedRequest {
         available_keys
             .iter()
             .find(|key| {
-                key.key_name == self.token_name && key.certificate_name == self.certificate_name
+                key.pesign_token_name == self.token_name
+                    && key.pesign_certificate_name == self.certificate_name
             })
             .ok_or_else(|| {
                 tracing::error!(

@@ -11,11 +11,15 @@ client_certificate = "sigul.client.certificate.pem"
 ca_certificate = "sigul.ca_certificate.pem"
 
 [[keys]]
+pesign_token_name = "OpenSC Card"
+pesign_certificate_name = "whatever pesign asked for"
 key_name = "Sigul HSM Key"
 certificate_name = "Secure Boot Code Signing Certificate"
 passphrase_path = "sigul.signing-key-passphrase"
 
 [[keys]]
+pesign_token_name = "OpenSC Card"
+pesign_certificate_name = "whatever pesign asked for"
 key_name = "bad key"
 certificate_name = "bad cert"
 passphrase_path = "sigul.signing-key-passphrase"

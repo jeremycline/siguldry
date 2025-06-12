@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The minimum supported Rust version (MSRV) is now 1.84 to align with RHEL 9.6 and 10.0 (#45)
 
+- The `keys` section of the configuration file now has two additional required fields:
+  `pesign_token_name` and `pesign_certificate_name`. These are used when looking up
+  the key entry for a pesign-client request and the `key_name` and `certificate_name`
+  fields are used when requesting the signature from Sigul. This allows the names in
+  Sigul to be different from what pesign-client is aware of (#51)
+
 
 ## [0.4.0] - 2025-05-05
 
