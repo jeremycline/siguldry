@@ -38,6 +38,8 @@ features = ["net"]
 [dependencies.siguldry]
 path = "../siguldry"
 version = "0.3"
+default-features = false
+features = ["v1"]
 
 # Used to temporarily stash input files for sigul within the runtime directory.
 [dependencies.tempfile]
