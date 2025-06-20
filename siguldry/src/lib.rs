@@ -28,3 +28,4 @@ mod connection;
 pub mod error;
 mod nestls;
 mod serdes;
+mod bridge;
