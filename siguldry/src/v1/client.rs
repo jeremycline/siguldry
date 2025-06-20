@@ -15,7 +15,7 @@ use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite};
 use tracing::{instrument, Instrument};
 
-use crate::connection::Connection;
+use crate::v1::connection::Connection;
 use crate::error::ClientError as Error;
 
 /// String newtype with custom Display and Debug impls to avoid logging passphrases.
