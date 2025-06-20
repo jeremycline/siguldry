@@ -23,8 +23,8 @@ feature flags.
 [1]: https://pagure.io/sigul
 */
 
-pub mod client;
-mod connection;
-pub mod error;
-mod nestls;
+pub mod v1;
+pub use v1::client;
+pub use v1::error;
 mod serdes;
+pub mod v2;

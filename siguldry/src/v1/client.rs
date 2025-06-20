@@ -15,8 +15,8 @@ use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite};
 use tracing::{instrument, Instrument};
 
-use crate::connection::Connection;
 use crate::error::ClientError as Error;
+use crate::v1::connection::Connection;
 
 /// String newtype with custom Display and Debug impls to avoid logging passphrases.
 pub struct Password(String);
@@ -486,7 +486,7 @@ impl TlsConfig {
     }
 
     /// Retrieve an SSL configuration acceptable to use when connecting to the provided hostname.
-    fn ssl(&self, hostname: &str) -> Result<openssl::ssl::Ssl, Error> {
+    pub fn ssl(&self, hostname: &str) -> Result<openssl::ssl::Ssl, Error> {
         let ssl = self.connector.configure()?.into_ssl(hostname)?;
         tracing::debug!(verify_mode=?ssl.ssl_context().verify_mode(), hostname=hostname, "Created SSL connection config");
         Ok(ssl)

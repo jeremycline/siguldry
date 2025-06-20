@@ -378,7 +378,7 @@ impl InnerConnection {
         // - Send size of inner bytes by sending a u32 of the size, OR'd with CHUNK_INNER_MASK.
         //   This also means MAX_CHUNK_SIZE = CHUNK_INNER_MASK - 1
 
-        let mut nestls = crate::nestls::Nestls::connect(self.stream, ssl).await?;
+        let mut nestls = crate::v1::nestls::Nestls::connect(self.stream, ssl).await?;
         let stream = nestls.inner_mut();
 
         stream.write_all(&payload).await?;

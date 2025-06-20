@@ -13,7 +13,8 @@ repository = "https://github.com/fedora-infra/siguldry"
 
 [features]
 default = []
-client-cli = ["clap", "tracing-subscriber", "tokio/fs"]
+client-cli = []
+#client-cli = ["clap", "tracing-subscriber", "tokio/fs"]
 
 
 [dependencies.anyhow]
@@ -35,6 +36,9 @@ version = "0.10"
 version = "1.0.145"
 features = ["derive"]
 
+[dependencies.serde_json]
+version = "1"
+
 [dependencies.thiserror]
 version = "2"
 
@@ -44,10 +48,14 @@ features = ["macros", "net", "rt", "io-util", "time"]
 
 [dependencies.tokio-util]
 version = "0.7"
-features = ["io"]
+features = ["io", "rt"]
 
 [dependencies.tokio-openssl]
 version = "0.6"
+
+[dependencies.tower]
+version = "0.5"
+features = ["buffer", "make", "retry", "reconnect", "timeout", "util"]
 
 [dependencies.tracing]
 version = "0.1.36"
@@ -56,12 +64,26 @@ version = "0.1.36"
 version = "0.3.17"
 default-features = false
 features = ["std", "registry", "fmt", "env-filter"]
-optional = true
+#optional = true
+
+# Used to generate unique IDs for each request
+[dependencies.uuid]
+version = "1.6"
+features = ["v7", "serde"]
+
+[dependencies.zerocopy]
+version = "0.8"
+features = ["std", "derive"]
 
 
 [dev-dependencies]
 anyhow = "1"
 proptest = "1.6"
+tempfile = "3"
+
+[dev-dependencies.tokio]
+version = "1.27"
+features = ["process"]
 
 [dev-dependencies.pyo3]
 version = "0.25"
@@ -69,8 +91,6 @@ features = ["auto-initialize"]
 
 # As we use OpenSSL for the TLS connection, let's stick with it for this as well.
 # The upstream default engine is nettle.
-#
-# Bump to 2.0 once Rust 1.85 is available (November 2025)
 [dev-dependencies.sequoia-openpgp]
 version = "2"
 default-features = false

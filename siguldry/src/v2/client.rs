@@ -1,0 +1,319 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) Microsoft Corporation.
+
+//! This module provides a Sigul client.
+
+use std::{fmt::Debug, future::Future, pin::Pin, sync::Arc, task::Poll, time::Duration};
+
+use anyhow::Context;
+use bytes::{BufMut, Bytes, BytesMut};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::{mpsc, oneshot, Mutex},
+    task::JoinHandle,
+    time::Instant,
+};
+use tower::{
+    reconnect::Reconnect,
+    retry::backoff::{Backoff, ExponentialBackoff, MakeBackoff},
+    util::rng::HasherRng,
+    Service, ServiceExt,
+};
+use tracing::{instrument, Instrument};
+use zerocopy::{IntoBytes, TryFromBytes};
+
+use crate::v2::{
+    error::ClientError,
+    nestls::{Nestls, NestlsBuilder},
+    protocol::{self, Frame, Request, Response, Role},
+    tls,
+};
+
+/// The client connection configuration.
+#[derive(Debug)]
+pub struct ConnectionConfig {
+    tls_config: tls::ClientConfig,
+    bridge_address: String,
+    bridge_hostname: String,
+    server_hostname: String,
+}
+
+impl ConnectionConfig {
+    /// Create a new client connection configuration.
+    pub fn new(
+        tls_config: tls::ClientConfig,
+        bridge_address: String,
+        bridge_hostname: String,
+        server_hostname: String,
+    ) -> Self {
+        Self {
+            tls_config,
+            bridge_address,
+            bridge_hostname,
+            server_hostname,
+        }
+    }
+}
+
+/// A siguldry client.
+pub struct Client {
+    inner: Reconnect<MakeClientService, ()>,
+}
+
+impl Client {
+    /// Create a new client
+    pub fn new(config: ConnectionConfig) -> Self {
+        let inner = Reconnect::new(MakeClientService::new(config), ());
+        Self { inner }
+    }
+
+    async fn send(&mut self, request: Request) -> Result<Response, ClientError> {
+        self.inner
+            .ready()
+            .await
+            .map_err(|err| *err.downcast::<ClientError>().expect("TODO"))?
+            .call(request)
+            .await
+            .map_err(|err| *err.downcast::<ClientError>().expect("huh"))
+    }
+
+    async fn reconnecting_send(&mut self, request: Request) -> Result<Response, ClientError> {
+        loop {
+            match self.send(request.clone()).await {
+                Ok(response) => break Ok(response),
+                Err(ClientError::Connection(error)) => {
+                    tracing::info!(?error, "Failed to connect");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Err(err) => break Err(err),
+            }
+        }
+    }
+
+    /// Attempt to authenticate against the server.
+    ///
+    /// Returns the username you successfully authenticated as.
+    pub async fn who_am_i(&mut self) -> Result<String, ClientError> {
+        let request = protocol::Request::WhoAmI {};
+        let response = self.reconnecting_send(request).await?;
+        match response {
+            Response::WhoAmI { user } => Ok(user),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MakeClientService {
+    config: Arc<Mutex<ConnectionConfig>>,
+    last_connection: Option<Instant>,
+}
+
+impl MakeClientService {
+    fn new(config: ConnectionConfig) -> Self {
+        Self {
+            config: Arc::new(Mutex::new(config)),
+            last_connection: None,
+        }
+    }
+}
+
+impl<R> Service<R> for MakeClientService {
+    type Response = tower::retry::Retry<RetryPolicy, tower::timeout::Timeout<ClientService>>;
+    type Error = ClientError;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
+
+    fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _req: R) -> Self::Future {
+        let conn_info = self.config.clone();
+        let last_connection_time = self.last_connection;
+        let interval = Duration::from_secs(1);
+        self.last_connection = Some(Instant::now());
+        let fut = async move {
+            if let Some(last_connection_time) = last_connection_time {
+                let duration_since = Instant::now() - last_connection_time;
+                tokio::time::sleep(interval.saturating_sub(duration_since)).await;
+            }
+            tracing::debug!("Creating new service connection");
+            let conn_info = conn_info.lock().await;
+            let conn = NestlsBuilder::new(
+                conn_info
+                    .tls_config
+                    .ssl(&conn_info.bridge_hostname)
+                    .unwrap(),
+                Role::Client,
+            )
+            .connect(
+                &conn_info.bridge_address,
+                conn_info
+                    .tls_config
+                    .ssl(&conn_info.server_hostname)
+                    .unwrap(),
+            )
+            .await?;
+
+            let policy = RetryPolicy::new();
+            let client = tower::ServiceBuilder::new()
+                .retry(policy)
+                .timeout(Duration::from_secs(30))
+                .service(ClientService::new(conn));
+            tracing::info!("new client service created");
+            Ok(client)
+        };
+        Box::pin(fut)
+    }
+}
+
+#[derive(Clone)]
+struct ClientService {
+    request_tx: mpsc::Sender<(Frame, Bytes, oneshot::Sender<Response>)>,
+    connection_actor: Arc<JoinHandle<Result<(), ClientError>>>,
+    session_id: String,
+}
+
+impl ClientService {
+    fn new(connection: Nestls) -> Self {
+        let (request_tx, request_rx) = mpsc::channel(128);
+        let session_id = connection.session_id().to_string();
+        let connection_actor =
+            Arc::new(tokio::spawn(Self::request_handler(connection, request_rx)));
+        // TODO switch to actor to hold the connection
+        Self {
+            request_tx,
+            connection_actor,
+            session_id,
+        }
+    }
+
+    async fn request_handler(
+        mut connection: Nestls,
+        mut request_rx: mpsc::Receiver<(Frame, Bytes, oneshot::Sender<Response>)>,
+    ) -> Result<(), ClientError> {
+        // TODO split in read/write half and select
+        while let Some((request_frame, request, respond_to)) = request_rx.recv().await {
+            tracing::info!("Request received");
+            connection.write_all(request_frame.as_bytes()).await?;
+            connection.write_all(request.as_bytes()).await?;
+
+            let mut frame_buffer = [0_u8; std::mem::size_of::<protocol::Frame>()];
+            connection.read_exact(&mut frame_buffer).await?;
+            let frame = protocol::Frame::try_ref_from_bytes(&frame_buffer).unwrap();
+            tracing::info!(?frame, "New frame received");
+
+            let frame_size: usize = frame.size.get().try_into().unwrap();
+            let mut response_buffer = BytesMut::with_capacity(frame_size).limit(frame_size);
+            while response_buffer.remaining_mut() != 0 {
+                connection.read_buf(&mut response_buffer).await?;
+            }
+
+            let response_bytes = response_buffer.into_inner().freeze();
+            match frame.content_type {
+                protocol::ContentType::Json => {
+                    let response: Response = serde_json::from_slice(&response_bytes).unwrap();
+                    respond_to.send(response).unwrap();
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl Service<Request> for ClientService {
+    type Response = Response;
+    type Error = ClientError;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
+
+    fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> Poll<Result<(), Self::Error>> {
+        if self.connection_actor.is_finished() {
+            // The actor should only exit if the connection failed
+            Poll::Ready(Err(ClientError::Fatal(anyhow::anyhow!("placeholder"))))
+        } else {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[instrument(skip_all, fields(session_id = self.session_id))]
+    fn call(&mut self, request: Request) -> Self::Future {
+        let request = serde_json::to_string(&request).unwrap();
+        let request = Bytes::from_owner(request);
+        let request_frame = protocol::Frame::new(
+            request.as_bytes().len().try_into().unwrap(),
+            protocol::ContentType::Json,
+        );
+        let (response_tx, response_rx) = oneshot::channel();
+        let request_tx = self.request_tx.clone();
+
+        let fut = async move {
+            request_tx
+                .send((request_frame, request, response_tx))
+                .await
+                .context("Couldn't send request to actor")?;
+            let response = response_rx.await.context("Actor channel didn't respond")?;
+            Ok(response)
+        }
+        .instrument(tracing::Span::current());
+
+        Box::pin(fut)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RetryPolicy {
+    attempts: usize,
+    backoff: ExponentialBackoff,
+}
+
+impl RetryPolicy {
+    fn new() -> Self {
+        let backoff = tower::retry::backoff::ExponentialBackoffMaker::new(
+            Duration::from_millis(500),
+            Duration::from_secs(3),
+            50.0,
+            HasherRng::new(),
+        )
+        .unwrap()
+        .make_backoff();
+        Self {
+            attempts: 0,
+            backoff,
+        }
+    }
+}
+
+impl tower::retry::Policy<Request, Response, tower::BoxError> for RetryPolicy {
+    type Future = <ExponentialBackoff as Backoff>::Future;
+
+    fn retry(
+        &mut self,
+        _req: &mut Request,
+        result: &mut Result<Response, tower::BoxError>,
+    ) -> Option<Self::Future> {
+        match result {
+            Ok(_) => None,
+            //Err(ClientError::Fatal(error)) => {
+            //    tracing::error!(?error, "fatal error, not retrying");
+            //    None
+            //}
+            Err(error) => {
+                // TODO sort through errors to retry vs not
+                if self.attempts > 3 {
+                    return None;
+                }
+                self.attempts += 1;
+                let backoff = self.backoff.next_backoff();
+                let retry_in = backoff
+                    .deadline()
+                    .saturating_duration_since(tokio::time::Instant::now());
+                tracing::info!(?retry_in, attempt = self.attempts, "Retrying request");
+                Some(self.backoff.next_backoff())
+            }
+        }
+    }
+
+    fn clone_request(&mut self, req: &Request) -> Option<Request> {
+        Some(req.clone())
+    }
+}
