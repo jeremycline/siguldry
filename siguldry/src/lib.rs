@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) Microsoft Corporation.
-#![warn(missing_docs)]
 
 /*!
 # Siguldry
@@ -23,8 +22,13 @@ feature flags.
 [1]: https://pagure.io/sigul
 */
 
-pub mod client;
-mod connection;
-pub mod error;
-mod nestls;
+#[cfg(feature = "v1")]
+pub mod v1;
+#[cfg(feature = "v1")]
+pub use v1::client;
+#[cfg(feature = "v1")]
+pub use v1::error;
+#[cfg(feature = "v1")]
 mod serdes;
+
+pub mod v2;

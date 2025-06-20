@@ -19,8 +19,8 @@ use tokio::{
 use tokio_openssl::SslStream;
 use tracing::{instrument, Instrument};
 
-use crate::connection::{Chunk, CHUNK_INNER_MASK, MAX_CHUNK_SIZE, MAX_READ_BUF};
 use crate::error::ConnectionError as Error;
+use crate::v1::connection::{Chunk, CHUNK_INNER_MASK, MAX_CHUNK_SIZE, MAX_READ_BUF};
 
 /// Implements a nested ("inner") TLS session on top of an existing TLS session.
 ///

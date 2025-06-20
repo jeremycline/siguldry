@@ -5,6 +5,8 @@
 //
 // These tests are expected to work against sigul v1.3+.
 
+#![cfg(feature = "v1")]
+
 use std::{
     path::PathBuf,
     time::{Duration, SystemTime},
