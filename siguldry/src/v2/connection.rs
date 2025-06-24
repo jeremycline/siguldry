@@ -41,13 +41,49 @@
 //! support multiple versions, but must always use the version requested by the client if it is
 //! supported.
 //! 
+//! |--------------------------|
+//! |      Protocol Header     | 
+//! |--------------------------|
+//! | u64 | Magic number       | 
+//! | u32 | Protocol version   |
+//! | u8  | Role               |
+//! |--------------------------|
+//! 
+//! 
 //! ### Frames
 //! 
-//! Each message between the server, bridge, or client must be encapsulated in a frame. A frame
-//! consists of a recipient, followed by a content type, followed by the frame size in bytes. The
-//! recipient is represented as a u8 and uses the values `0` for client, `1` for server, and `2` for
-//! the bridge. The content type is represented as a u8, refer to [`ContentType`] for examples. The
-//! frame size is an unsigned 64 bit integer. This should be sent in network byte order.
+//! Each message following the protocol header must be encapsulated in a frame, which includes
+//! a header and a footer.
+//! 
+//! #### Header
+//! 
+//! A frame header consists of a recipient, followed by a content type, followed by the frame
+//! size in bytes.
+//! 
+//! |--------------------------|
+//! |      Frame Header        | 
+//! |--------------------------|
+//! | u8  | Recipient          | 
+//! | u32 | Content-Type       |
+//! | u64 | Frame size (bytes) |
+//! |--------------------------|
+//! 
+//! The [`Recipient`] is represented as a u8 and uses the values `0` for client, `1` for server, and
+//! `2` for the bridge.  The content type is represented as a u32, refer to [`ContentType`] for
+//! examples.  The frame size is an unsigned 64 bit integer and does *NOT* include the frame footer.
+//! This should be sent in network byte order.
+//! 
+//! #### Footer
+//! 
+//! A frame footer is made up of the the frame's HMAC-SHA512 signature. The frame header and body are
+//! both included in the signature. The key used for signing is exchanged with the server in the
+//! nested TLS session during the connection handshake.
+//! 
+//! |---------------------------|
+//! |       Frame Footer        | 
+//! |---------------------------|
+//! | [u8; 64] | HMAC Signature |
+//! |---------------------------|
 
 use std::{collections::HashMap, pin::Pin, str};
 
@@ -85,10 +121,9 @@ enum Role {
 }
 
 struct ProtocolHeader {
-    magic: [u8; 8],  // SIGULDRY
+    magic: u64,  // SIGULDRY
     version: u32,
     role: Role
-
 }
 
 struct Frame {
