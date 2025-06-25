@@ -1,78 +1,90 @@
-use std::{io::Read, path::Path, pin::Pin, sync::Arc};
+use std::{fmt::Debug, io::Read, path::Path, pin::Pin};
 
 use openssl::ssl::{Ssl, SslAcceptor, SslFiletype, SslMethod, SslVerifyMode, SslVersion};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::{
+    io::AsyncReadExt,
+    net::{TcpListener, TcpStream, ToSocketAddrs},
+};
 use tokio_openssl::SslStream;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{instrument, Instrument};
 
 async fn accept_conn(tcp_listener: &TcpListener, tls_config: &SslAcceptor) -> SslStream<TcpStream> {
     let (tcp_stream, client_addr) = tcp_listener.accept().await.unwrap();
-    tracing::info!(?client_addr, "New TCP connection established");
+    tracing::info!(listener=?tcp_listener, ?client_addr, "New TCP connection established");
     let ssl = Ssl::new(tls_config.context()).unwrap();
     let mut stream = tokio_openssl::SslStream::new(ssl, tcp_stream).unwrap();
-    Pin::new(&mut stream).accept().await.unwrap();
-    tracing::info!(?client_addr, "TLS session established");
+    let result = Pin::new(&mut stream).accept().await;
+    tracing::info!(listener=?tcp_listener, ?client_addr, ?result, "TLS session established");
 
     stream
 }
 
-// TODO see about tower service
-pub async fn listen(halt_token: CancellationToken) {
-
-    let addr = "127.0.0.1:8080";
-    let client_listener = TcpListener::bind(addr).await.unwrap();
-    let server_listener = TcpListener::bind("127.0.0.1:8081").await.unwrap();
-    let tls_config = Arc::new(acceptor("devel/creds/sigul.bridge.certificate.pem", "devel/creds/sigul.bridge.private_key.pem", None, "devel/creds/sigul.ca_certificate.pem").unwrap());
+pub async fn listen<S>(
+    client_socket_addr: S,
+    server_socket_addr: S,
+    tls_config: SslAcceptor,
+    halt_token: CancellationToken,
+) where
+    S: ToSocketAddrs + Debug,
+{
+    let client_listener = TcpListener::bind(client_socket_addr).await.unwrap();
+    let server_listener = TcpListener::bind(server_socket_addr).await.unwrap();
     let request_tracker = TaskTracker::new();
 
-    let streams = tokio::join!(accept_conn(&client_listener, &tls_config), accept_conn(&server_listener, &tls_config));
-    let (client_stream, server_stream) = streams;
-    request_tracker.spawn(bridge(client_stream, server_stream).instrument(tracing::Span::current()));
-
     'accept: loop {
-        let mut client_connection = None;
-        let mut server_connection = None;
+        tokio::select! {
+            _ = halt_token.cancelled() => {
+                tracing::info!("Shutdown requested, no new requests will be accepted");
+                break 'accept;
+            },
+            (client_conn, server_conn) = async {
+                tokio::join!(accept_conn(&client_listener, &tls_config), accept_conn(&server_listener, &tls_config))
+            } => {
 
-        // TODO: maybe accept a pool of client and server conns
-        while client_connection.is_none() || server_connection.is_none() {
-            tokio::select! {
-                _ = halt_token.cancelled() => {
-                    tracing::info!("Shutdown requested, no new requests will be accepted");
-                    break 'accept;
-                }
-                client_conn = accept_conn(&client_listener, &tls_config), if client_connection.is_none() => client_connection = Some(client_conn),
-                server_conn = accept_conn(&server_listener, &tls_config), if server_connection.is_none() => server_connection = Some(server_conn),
-            }
+                tracing::info!("Bridging new connection");
+                request_tracker.spawn(bridge(client_conn, server_conn).instrument(tracing::Span::current()),
+                );
+            },
         }
-        request_tracker.spawn(bridge(client_connection.unwrap(), server_connection.unwrap()).instrument(tracing::Span::current()));
     }
+
+    request_tracker.close();
+    request_tracker.wait().await;
 }
 
 fn acceptor<P: AsRef<Path>>(
-        certificate: P,
-        private_key: P,
-        private_key_passphrase: Option<P>,
-    
-    client_ca: P) -> Result<SslAcceptor, openssl::error::ErrorStack> {
+    certificate: P,
+    private_key: P,
+    private_key_passphrase: Option<P>,
+
+    client_ca: P,
+) -> Result<SslAcceptor, openssl::error::ErrorStack> {
     let mut private_key_buf = vec![];
-    std::fs::File::open(private_key).unwrap().read_to_end(&mut private_key_buf).unwrap();
+    std::fs::File::open(private_key)
+        .unwrap()
+        .read_to_end(&mut private_key_buf)
+        .unwrap();
     let private_key = match &private_key_passphrase {
         Some(passphrase_path) => {
             let mut passphrase = vec![];
-            std::fs::File::open(passphrase_path).unwrap().read_to_end(&mut passphrase).unwrap();
+            std::fs::File::open(passphrase_path)
+                .unwrap()
+                .read_to_end(&mut passphrase)
+                .unwrap();
             openssl::pkey::PKey::private_key_from_pem_passphrase(&private_key_buf, &passphrase)?
         }
         None => openssl::pkey::PKey::private_key_from_pem(&private_key_buf)?,
     };
-    let f = std::fs::read_to_string(client_ca).unwrap();
-    let client_ca = openssl::x509::X509::from_pem(f.as_bytes())?;
+    let f = std::fs::read_to_string(&client_ca).unwrap();
+    let client_ca_cert = openssl::x509::X509::from_pem(f.as_bytes())?;
 
-    let mut acceptor = SslAcceptor::mozilla_modern_v5(SslMethod::tls())?;
+    let mut acceptor = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
     acceptor.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
     // TODO probaby should bump client up to 1.3
     acceptor.set_min_proto_version(Some(SslVersion::TLS1_2))?;
-    acceptor.add_client_ca(&client_ca)?;
+    acceptor.add_client_ca(&client_ca_cert)?;
+    acceptor.set_ca_file(client_ca).unwrap();
     acceptor.set_private_key(&private_key)?;
     acceptor.set_certificate_file(&certificate, SslFiletype::PEM)?;
     acceptor.check_private_key()?;
@@ -82,7 +94,10 @@ fn acceptor<P: AsRef<Path>>(
 }
 
 #[instrument(skip_all)]
-async fn bridge(client_conn: SslStream<TcpStream>, server_conn: SslStream<TcpStream>) {
+async fn bridge(
+    mut client_conn: SslStream<TcpStream>,
+    mut server_conn: SslStream<TcpStream>,
+) -> anyhow::Result<()> {
     // First, read and parse the client request
     // This includes the header, op, and payload. The operation and payload are sent on to the server
     // Then we should get an inner TLS session which we need to forward both ways
@@ -91,7 +106,7 @@ async fn bridge(client_conn: SslStream<TcpStream>, server_conn: SslStream<TcpStr
     // If we want to support the "many-requests-in-a-connection" thing that is only in sign-rpms, after
     // the reply headers/payload, the client and server are free to chatter back and forth, but all that
     // logic is in the bridge. I don't love it, but if we don't do that we need to accept implementing a
-    // whole v2 API 
+    // whole v2 API
 
     // API improvements
     //
@@ -101,7 +116,7 @@ async fn bridge(client_conn: SslStream<TcpStream>, server_conn: SslStream<TcpStr
     // Consider something like WebSockets which handles all the framing for us. Alternatively, make the framing
     // less of a headache. e.g. a frame is a whole message for one receipient and the header covers (total_size, recipient).
     // There should be no multi-frame requests/responses.
-    // 
+    //
     // Do away with sending the files to the server, require small payloads with the digest to be signed?
     //
     // Make the connection lifecycle be:
@@ -110,7 +125,7 @@ async fn bridge(client_conn: SslStream<TcpStream>, server_conn: SslStream<TcpStr
     //
     // Inner connection client -> server for any secrets exchange (and afterwards no other inner session can be made).
     // The inner connection goes as long as both sides send blobs targeted for the other side.
-    // 
+    //
     // Client sends requests to bridge, server sends responses. Can continue however long they like, and each request
     // is separate from the prior one, except using the initially established secrets? Or put some restrictions on this,
     // e.g. must be for signing only and of the same type? Maybe split API into management and signing, management requests
@@ -119,4 +134,23 @@ async fn bridge(client_conn: SslStream<TcpStream>, server_conn: SslStream<TcpStr
     //
     // Each request has an id that spans client/bridge/server
 
+    // TODO READ HEADER
+    let mut client_header = [0_u8; 13];
+    _ = client_conn.read_exact(&mut client_header).await?;
+    tracing::info!(?client_header, "client header received");
+    let mut server_header = [0_u8; 13];
+    _ = server_conn.read_exact(&mut server_header).await?;
+    tracing::info!(?server_header, "client header received");
+
+    let size = 1024 * 64;
+    let (client_sent_bytes, server_sent_bytes) =
+        tokio::io::copy_bidirectional_with_sizes(&mut client_conn, &mut server_conn, size, size)
+            .await?;
+    tracing::info!(
+        client_sent_bytes,
+        server_sent_bytes,
+        "Connection bridge completed"
+    );
+
+    Ok(())
 }

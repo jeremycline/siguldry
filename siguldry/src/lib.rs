@@ -27,5 +27,4 @@ pub mod v1;
 pub use v1::client;
 pub use v1::error;
 mod serdes;
-mod bridge;
-mod v2;
+pub mod v2;

@@ -11,7 +11,6 @@ at this time.
 [1]: https://pagure.io/sigul
 */
 
-pub mod client;
-mod connection;
+pub mod bridge;
+pub mod connection;
 pub mod error;
-mod nestls;
