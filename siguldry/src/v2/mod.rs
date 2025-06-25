@@ -14,3 +14,4 @@ at this time.
 pub mod bridge;
 pub mod connection;
 pub mod error;
+pub mod tls;

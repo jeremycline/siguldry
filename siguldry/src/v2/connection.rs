@@ -1,6 +1,20 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) Microsoft Corporation.
 
+//! A nested TLS connection.
+//!
+//! The Siguldry server is designed to accept no incoming network connections. Instead, it
+//! communicates with Siguldry clients via a bridge, which proxies the communication back and forth
+//! between the client and the server.
+//!
+//! In order to ensure the bridge has no visibility into the secrets being shared from the client,
+//! such as passphrases to access signing keys, the client and server use TLS within the TLS
+//! connection to the bridge.
+//!
+//! A [`Nestls`] connection is capable of behaving as a client or a server. It does not
+//! implement the Siguldry protocol, and merely provides a socket over which the protocol can be
+//! implemented.
+
 //! Connect to a Sigul bridge and server.
 //!
 //! [`Connection`] is capable of connecting to a Sigul bridge and the Sigul server
@@ -94,7 +108,7 @@
 use std::pin::Pin;
 
 use bytes::BytesMut;
-use openssl::ssl::{Ssl, SslAcceptor};
+use openssl::ssl::Ssl;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, DuplexStream},
     net::{TcpStream, ToSocketAddrs},
@@ -104,7 +118,7 @@ use tokio_openssl::SslStream;
 use tracing::{instrument, Instrument};
 use zerocopy::{Immutable, IntoBytes, KnownLayout};
 
-use crate::error::ConnectionError as Error;
+use crate::{error::ConnectionError as Error, v2::tls::ServerConfig};
 
 /// Magic number used in the protocol header.
 pub const MAGIC: u64 = u64::from_le_bytes([83, 73, 71, 85, 76, 68, 82, 89]);
@@ -231,11 +245,12 @@ impl Nestls<state::New> {
         })
     }
 
+    /// Act as a Siguldry server and accept new nested TLS sessions from the bridge.
     #[instrument(err, skip_all)]
     pub async fn accept<A: ToSocketAddrs + std::fmt::Debug>(
         bridge_addr: A,
         bridge_ssl: Ssl,
-        server_ssl: &SslAcceptor,
+        server_tls_config: &ServerConfig,
     ) -> Result<Nestls<state::Server>, Error> {
         let outer_stream = Self::connect_to_bridge(bridge_addr, bridge_ssl, Role::Server).await?;
 
@@ -263,7 +278,7 @@ impl Nestls<state::New> {
             .in_current_span(),
         );
 
-        let ssl = Ssl::new(server_ssl.context())?;
+        let ssl = server_tls_config.ssl()?;
         let mut inner_stream = tokio_openssl::SslStream::new(ssl, client_write_half)?;
         Pin::new(&mut inner_stream).accept().await?;
         tracing::debug!("Accepted new TLS connection from a client");
@@ -296,49 +311,6 @@ impl Nestls<state::New> {
             ?role,
             "Protocol header sent"
         );
-
-        Ok(outer_stream)
-    }
-
-    /// Pipe data between the outer TLS session and the inner TLS session.
-    #[instrument(err, skip_all)]
-    async fn ferry(
-        mut outer_stream: SslStream<TcpStream>,
-        mut client_inner_tls: DuplexStream,
-    ) -> Result<SslStream<TcpStream>, Error> {
-        let mut sent_inner_eof = false;
-        let mut from_bridge_buffer = BytesMut::new();
-        let mut from_client_buffer = BytesMut::new();
-        loop {
-            tokio::select! {
-                // Read data from the client to forward via the bridge to the server.
-                num_bytes = client_inner_tls.read_buf(&mut from_client_buffer), if !sent_inner_eof => {
-                    // We expect to have completely written out the buffer each time.
-                    let num_bytes = num_bytes?;
-                    let to_forward = from_client_buffer.split().freeze();
-                    tracing::trace!(num_bytes, "Forwarding bytes client wrote to the inner TLS session");
-                    outer_stream.write_all(&to_forward).await?;
-
-                    if num_bytes == 0 {
-                        tracing::debug!("EOF received for inner TLS session from client");
-                        sent_inner_eof = true;
-                    }
-                },
-
-                // Read data from the server to forward to the client
-                num_bytes = outer_stream.read_buf(&mut from_bridge_buffer) => {
-                    let num_bytes = num_bytes?;
-                    tracing::trace!(num_bytes, "Received bytes from the Sigul bridge");
-                    let to_forward = from_bridge_buffer.split().freeze();
-                    client_inner_tls.write_all(&to_forward).await?;
-
-                    if num_bytes == 0 {
-                        tracing::debug!("EOF received for inner TLS session from server");
-                        break;
-                    }
-                }
-            }
-        }
 
         Ok(outer_stream)
     }

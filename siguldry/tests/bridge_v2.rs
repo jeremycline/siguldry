@@ -41,7 +41,7 @@ async fn basic_bridge_config() {
         halt_token.clone(),
     ));
 
-    let tls_config = siguldry::client::TlsConfig::new(
+    let tls_config = siguldry::v2::tls::ClientConfig::new(
         creds_directory.join("sigul.client.certificate.pem"),
         creds_directory.join("sigul.client.private_key.pem"),
         None,
@@ -54,7 +54,7 @@ async fn basic_bridge_config() {
         tls_config.ssl("sigul-server").unwrap(),
     ));
 
-    let server_tls_config = acceptor(
+    let server_tls_config = siguldry::v2::tls::ServerConfig::new(
         creds_directory.join("sigul.server.certificate.pem"),
         creds_directory.join("sigul.server.private_key.pem"),
         None,
@@ -85,43 +85,4 @@ async fn basic_bridge_config() {
 
     halt_token.cancel();
     listener.await.unwrap();
-}
-
-fn acceptor<P: AsRef<Path>>(
-    certificate: P,
-    private_key: P,
-    private_key_passphrase: Option<P>,
-    client_ca: P,
-) -> Result<SslAcceptor, openssl::error::ErrorStack> {
-    let mut private_key_buf = vec![];
-    std::fs::File::open(private_key)
-        .unwrap()
-        .read_to_end(&mut private_key_buf)
-        .unwrap();
-    let private_key = match &private_key_passphrase {
-        Some(passphrase_path) => {
-            let mut passphrase = vec![];
-            std::fs::File::open(passphrase_path)
-                .unwrap()
-                .read_to_end(&mut passphrase)
-                .unwrap();
-            openssl::pkey::PKey::private_key_from_pem_passphrase(&private_key_buf, &passphrase)?
-        }
-        None => openssl::pkey::PKey::private_key_from_pem(&private_key_buf)?,
-    };
-    let f = std::fs::read_to_string(&client_ca).unwrap();
-    let client_ca_cert = openssl::x509::X509::from_pem(f.as_bytes())?;
-
-    let mut acceptor = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
-    acceptor.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
-    // TODO probaby should bump client up to 1.3
-    acceptor.set_min_proto_version(Some(SslVersion::TLS1_2))?;
-    acceptor.add_client_ca(&client_ca_cert)?;
-    acceptor.set_ca_file(client_ca).unwrap();
-    acceptor.set_private_key(&private_key)?;
-    acceptor.set_certificate_file(&certificate, SslFiletype::PEM)?;
-    acceptor.check_private_key()?;
-    // TODO verify client CN matches username
-
-    Ok(acceptor.build())
 }

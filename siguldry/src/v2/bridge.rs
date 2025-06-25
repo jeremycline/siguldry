@@ -3,16 +3,17 @@ use std::{fmt::Debug, io::Read, path::Path, pin::Pin};
 use openssl::ssl::{Ssl, SslAcceptor, SslFiletype, SslMethod, SslVerifyMode, SslVersion};
 use tokio::{
     io::AsyncReadExt,
-    net::{TcpListener, TcpStream, ToSocketAddrs},
+    net::{tcp, TcpListener, TcpStream, ToSocketAddrs},
 };
 use tokio_openssl::SslStream;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{instrument, Instrument};
 
-async fn accept_conn(tcp_listener: &TcpListener, tls_config: &SslAcceptor) -> SslStream<TcpStream> {
+use crate::v2::tls::ServerConfig;
+
+async fn accept_conn(tcp_listener: &TcpListener, ssl: Ssl) -> SslStream<TcpStream> {
     let (tcp_stream, client_addr) = tcp_listener.accept().await.unwrap();
     tracing::info!(listener=?tcp_listener, ?client_addr, "New TCP connection established");
-    let ssl = Ssl::new(tls_config.context()).unwrap();
     let mut stream = tokio_openssl::SslStream::new(ssl, tcp_stream).unwrap();
     let result = Pin::new(&mut stream).accept().await;
     tracing::info!(listener=?tcp_listener, ?client_addr, ?result, "TLS session established");
@@ -20,10 +21,11 @@ async fn accept_conn(tcp_listener: &TcpListener, tls_config: &SslAcceptor) -> Ss
     stream
 }
 
+/// Act as a Siguldry bridge on the provided socket addresses.
 pub async fn listen<S>(
     client_socket_addr: S,
     server_socket_addr: S,
-    tls_config: SslAcceptor,
+    tls_config: ServerConfig,
     halt_token: CancellationToken,
 ) where
     S: ToSocketAddrs + Debug,
@@ -39,7 +41,7 @@ pub async fn listen<S>(
                 break 'accept;
             },
             (client_conn, server_conn) = async {
-                tokio::join!(accept_conn(&client_listener, &tls_config), accept_conn(&server_listener, &tls_config))
+                tokio::join!(accept_conn(&client_listener, tls_config.ssl().unwrap()), accept_conn(&server_listener,  tls_config.ssl().unwrap()))
             } => {
 
                 tracing::info!("Bridging new connection");
@@ -51,46 +53,6 @@ pub async fn listen<S>(
 
     request_tracker.close();
     request_tracker.wait().await;
-}
-
-fn acceptor<P: AsRef<Path>>(
-    certificate: P,
-    private_key: P,
-    private_key_passphrase: Option<P>,
-
-    client_ca: P,
-) -> Result<SslAcceptor, openssl::error::ErrorStack> {
-    let mut private_key_buf = vec![];
-    std::fs::File::open(private_key)
-        .unwrap()
-        .read_to_end(&mut private_key_buf)
-        .unwrap();
-    let private_key = match &private_key_passphrase {
-        Some(passphrase_path) => {
-            let mut passphrase = vec![];
-            std::fs::File::open(passphrase_path)
-                .unwrap()
-                .read_to_end(&mut passphrase)
-                .unwrap();
-            openssl::pkey::PKey::private_key_from_pem_passphrase(&private_key_buf, &passphrase)?
-        }
-        None => openssl::pkey::PKey::private_key_from_pem(&private_key_buf)?,
-    };
-    let f = std::fs::read_to_string(&client_ca).unwrap();
-    let client_ca_cert = openssl::x509::X509::from_pem(f.as_bytes())?;
-
-    let mut acceptor = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
-    acceptor.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
-    // TODO probaby should bump client up to 1.3
-    acceptor.set_min_proto_version(Some(SslVersion::TLS1_2))?;
-    acceptor.add_client_ca(&client_ca_cert)?;
-    acceptor.set_ca_file(client_ca).unwrap();
-    acceptor.set_private_key(&private_key)?;
-    acceptor.set_certificate_file(&certificate, SslFiletype::PEM)?;
-    acceptor.check_private_key()?;
-    // TODO verify client CN matches username
-
-    Ok(acceptor.build())
 }
 
 #[instrument(skip_all)]
