@@ -1,12 +1,8 @@
-use std::{
-    io::Read,
-    path::{Path, PathBuf},
-};
+use std::path::PathBuf;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, EnvFilter};
 
-use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod, SslVerifyMode, SslVersion};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
@@ -21,23 +17,24 @@ async fn basic_bridge_config() {
     tracing::subscriber::set_global_default(registry)
         .expect("Programming error: set_global_default should only be called once.");
 
+    // TODO: generate keys on test run using siguldry_auth_keys.sh
     let creds_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         //.join("../")
         .canonicalize()
         .unwrap();
-    let tls_config = acceptor(
+
+    let bridge_tls_config = siguldry::v2::tls::ServerConfig::new(
         creds_directory.join("sigul.bridge.certificate.pem"),
         creds_directory.join("sigul.bridge.private_key.pem"),
         None,
-        creds_directory.join("sigul.ca_certificate.pem"),
+        creds_directory.join("sigul.ca.certificate.pem"),
     )
     .unwrap();
-
     let halt_token = CancellationToken::new();
     let listener = tokio::spawn(siguldry::v2::bridge::listen(
         "127.0.0.1:8080",
         "127.0.0.1:8081",
-        tls_config,
+        bridge_tls_config,
         halt_token.clone(),
     ));
 
@@ -45,7 +42,7 @@ async fn basic_bridge_config() {
         creds_directory.join("sigul.client.certificate.pem"),
         creds_directory.join("sigul.client.private_key.pem"),
         None,
-        creds_directory.join("sigul.ca_certificate.pem"),
+        creds_directory.join("sigul.ca.certificate.pem"),
     )
     .unwrap();
     let client = tokio::spawn(siguldry::v2::connection::Nestls::connect(
@@ -58,7 +55,7 @@ async fn basic_bridge_config() {
         creds_directory.join("sigul.server.certificate.pem"),
         creds_directory.join("sigul.server.private_key.pem"),
         None,
-        creds_directory.join("sigul.ca_certificate.pem"),
+        creds_directory.join("sigul.ca.certificate.pem"),
     )
     .unwrap();
     let server = tokio::spawn(async move {

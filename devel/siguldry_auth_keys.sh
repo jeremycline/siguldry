@@ -4,35 +4,39 @@ set -xeuo pipefail
 
 # Create a CA, then sign three certificates for the server, bridge, and client respectively.
 mkdir -p creds/
-pushd creds || exit
+pushd creds
 
 cat > openssl.cnf << EOF
-[client_auth_ext]
+[client_and_server_auth_ext]
 keyUsage = digitalSignature
 extendedKeyUsage = clientAuth,serverAuth
+[client_auth_ext]
+keyUsage = digitalSignature
+extendedKeyUsage = clientAuth
+[server_auth_ext]
+keyUsage = digitalSignature
+extendedKeyUsage = serverAuth
 EOF
 
-openssl genrsa -out ca-key.pem 2048
-openssl genrsa -out server-key.pem 2048
-openssl genrsa -out bridge-key.pem 2048
-openssl genrsa -out client-key.pem 2048
+# Create a CA used to sign the client certificates as well as the server and bridge server certificates
+openssl genrsa -out sigul.ca.private_key.pem 2048
+openssl req -x509 -new -nodes -key sigul.ca.private_key.pem -days 3650 -sha256 -extensions v3_ca -subj "/CN=Sigul CA" -out sigul.ca.certificate.pem
 
-openssl req -x509 -new -nodes -key ca-key.pem -days 3650 -sha256 -extensions v3_ca -subj "/CN=Sigul CA" -out ca-cert.pem
-openssl req -config ./openssl.cnf -new -sha256 -extensions client_auth_ext -subj "/CN=sigul-server" -key server-key.pem -out server-cert.csr
-openssl req -config ./openssl.cnf -new -sha256 -extensions client_auth_ext -subj "/CN=sigul-bridge" -key bridge-key.pem -out bridge-cert.csr
-openssl req -config ./openssl.cnf -new -sha256 -extensions client_auth_ext -subj "/CN=sigul-client" -key client-key.pem -out client-cert.csr
+# Create keys and certificates for server, client, and bridge
+openssl genrsa -out sigul.server.private_key.pem 2048
+openssl genrsa -out sigul.bridge.private_key.pem 2048
+openssl genrsa -out sigul.client.private_key.pem 2048
+openssl req -config ./openssl.cnf -new -sha256 -extensions client_and_server_auth_ext -subj "/CN=sigul-server" -key sigul.server.private_key.pem -out server-cert.csr
+openssl req -config ./openssl.cnf -new -sha256 -extensions server_auth_ext -subj "/CN=sigul-bridge" -key sigul.bridge.private_key.pem -out bridge-cert.csr
+openssl req -config ./openssl.cnf -new -sha256 -extensions client_auth_ext -subj "/CN=sigul-client" -key sigul.client.private_key.pem -out client-cert.csr
+openssl x509 -req -in server-cert.csr -extfile ./openssl.cnf -extensions client_and_server_auth_ext -CAkey sigul.ca.private_key.pem -CA sigul.ca.certificate.pem -days 3650 -sha256 -out sigul.server.certificate.pem
+openssl x509 -req -in bridge-cert.csr -extfile ./openssl.cnf -extensions server_auth_ext -CAkey sigul.ca.private_key.pem -CA sigul.ca.certificate.pem -days 3650 -sha256 -out sigul.bridge.certificate.pem
+openssl x509 -req -in client-cert.csr -extfile ./openssl.cnf -extensions client_auth_ext -CAkey sigul.ca.private_key.pem -CA sigul.ca.certificate.pem -days 3650 -sha256 -out sigul.client.certificate.pem
 
-openssl x509 -req -in server-cert.csr -extfile ./openssl.cnf -extensions client_auth_ext -CAkey ca-key.pem -CA ca-cert.pem -days 3650 -sha256 -out server-cert.pem
-openssl x509 -req -in bridge-cert.csr -extfile ./openssl.cnf -extensions client_auth_ext -CAkey ca-key.pem -CA ca-cert.pem -days 3650 -sha256 -out bridge-cert.pem
-openssl x509 -req -in client-cert.csr -extfile ./openssl.cnf -extensions client_auth_ext -CAkey ca-key.pem -CA ca-cert.pem -days 3650 -sha256 -out client-cert.pem
+rm openssl.cnf sigul.ca.private_key.pem *.csr
 
-rm openssl.cnf ca-key.pem *.csr
-mv bridge-cert.pem sigul.bridge.certificate.pem
-mv bridge-key.pem sigul.bridge.private_key.pem
-mv server-cert.pem sigul.server.certificate.pem
-mv server-key.pem sigul.server.private_key.pem
-mv client-cert.pem sigul.client.certificate.pem
-mv client-key.pem sigul.client.private_key.pem
-mv ca-cert.pem sigul.ca_certificate.pem
+openssl verify -CAfile ./sigul.ca.certificate.pem sigul.server.certificate.pem
+openssl verify -CAfile ./sigul.ca.certificate.pem sigul.bridge.certificate.pem
+openssl verify -CAfile ./sigul.ca.certificate.pem sigul.client.certificate.pem
 
-popd || exit
+popd
