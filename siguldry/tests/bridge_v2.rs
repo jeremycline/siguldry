@@ -1,13 +1,19 @@
 use std::path::PathBuf;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use anyhow::{bail, Context};
+use siguldry::v2::connection::{NestlsBuilder, ProtocolHeader, Role};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    process::Command,
+};
 use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, EnvFilter};
+use zerocopy::IntoBytes;
 
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
-async fn basic_bridge_config() {
-    let log_filter = EnvFilter::builder().parse("DEBUG").unwrap();
+async fn basic_bridge_config() -> anyhow::Result<()> {
+    let log_filter = EnvFilter::builder().parse("DEBUG")?;
     let stderr_layer = tracing_subscriber::fmt::layer()
         .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
         .with_writer(std::io::stderr);
@@ -17,19 +23,26 @@ async fn basic_bridge_config() {
     tracing::subscriber::set_global_default(registry)
         .expect("Programming error: set_global_default should only be called once.");
 
-    // TODO: generate keys on test run using siguldry_auth_keys.sh
-    let creds_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        //.join("../")
-        .canonicalize()
-        .unwrap();
+    let tempdir = tempfile::TempDir::new()?;
+    let mut command = Command::new("bash");
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../devel/sigul_auth_keys.sh");
+    let status = command
+        .current_dir(tempdir.path())
+        .args([script.as_path()])
+        .status()
+        .await?;
+    if !status.success() {
+        bail!("Failed to generate auth keys");
+    }
 
+    let creds_directory = tempdir.path().join("creds/");
     let bridge_tls_config = siguldry::v2::tls::ServerConfig::new(
         creds_directory.join("sigul.bridge.certificate.pem"),
         creds_directory.join("sigul.bridge.private_key.pem"),
         None,
         creds_directory.join("sigul.ca.certificate.pem"),
     )
-    .unwrap();
+    .context("Failed to load bridge credentials")?;
     let halt_token = CancellationToken::new();
     let listener = tokio::spawn(siguldry::v2::bridge::listen(
         "127.0.0.1:8080",
@@ -43,43 +56,38 @@ async fn basic_bridge_config() {
         creds_directory.join("sigul.client.private_key.pem"),
         None,
         creds_directory.join("sigul.ca.certificate.pem"),
-    )
-    .unwrap();
-    let client = tokio::spawn(siguldry::v2::connection::Nestls::connect(
-        "sigul-bridge:8080",
-        tls_config.ssl("sigul-bridge").unwrap(),
-        tls_config.ssl("sigul-server").unwrap(),
-    ));
+    )?;
+    let bridge_payload: ProtocolHeader = Role::Client.into();
+    let conn = NestlsBuilder::new(tls_config.ssl("sigul-bridge")?)
+        .with_bridge_payload(bytes::Bytes::copy_from_slice(bridge_payload.as_bytes()))
+        .connect("sigul-bridge:8080", tls_config.ssl("sigul-server")?);
+    let client = tokio::spawn(conn);
 
     let server_tls_config = siguldry::v2::tls::ServerConfig::new(
         creds_directory.join("sigul.server.certificate.pem"),
         creds_directory.join("sigul.server.private_key.pem"),
         None,
         creds_directory.join("sigul.ca.certificate.pem"),
-    )
-    .unwrap();
-    let server = tokio::spawn(async move {
-        siguldry::v2::connection::Nestls::accept(
-            "sigul-bridge:8081",
-            tls_config.ssl("sigul-bridge").unwrap(),
-            &server_tls_config,
-        )
-        .await
-    });
+    )?;
+    let bridge_payload: ProtocolHeader = Role::Server.into();
+    let conn = NestlsBuilder::new(tls_config.ssl("sigul-bridge")?)
+        .with_bridge_payload(bytes::Bytes::copy_from_slice(bridge_payload.as_bytes()))
+        .accept("sigul-bridge:8081", server_tls_config);
+    let server = tokio::spawn(conn);
 
-    let mut client_conn = client.await.unwrap().unwrap();
-    let inner_client = client_conn.inner();
-    let mut server_conn = server.await.unwrap().unwrap();
-    let inner_server = server_conn.inner();
-    inner_client.write_all(&[1, 2, 3]).await.unwrap();
-    drop(client_conn);
+    let mut client = client.await??;
+    let mut server = server.await??;
+    client.write_all(&[1, 2, 3]).await?;
+    drop(client);
 
     let mut buf = [0_u8; 3];
-    inner_server.read_exact(&mut buf).await.unwrap();
-    drop(server_conn);
+    server.read_exact(&mut buf).await?;
+    drop(server);
 
     assert_eq!(buf, [1, 2, 3]);
 
     halt_token.cancel();
-    listener.await.unwrap();
+    listener.await?;
+
+    Ok(())
 }

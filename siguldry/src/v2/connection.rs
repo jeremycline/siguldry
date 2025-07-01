@@ -110,7 +110,7 @@ use std::pin::Pin;
 use bytes::BytesMut;
 use openssl::ssl::Ssl;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt, DuplexStream},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream},
     net::{TcpStream, ToSocketAddrs},
     task::JoinHandle,
 };
@@ -138,15 +138,25 @@ enum Recipient {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum Role {
+pub enum Role {
     Client,
     Server,
 }
 
 #[derive(IntoBytes, Immutable, KnownLayout, Debug, Clone)]
-pub(crate) struct ProtocolHeader {
+pub struct ProtocolHeader {
+    /// Each connection starts with a [`MAGIC`] number. While the version and role
+    /// also have a fairly restricted set of valid values, this makes it even more likely a random
+    /// incoming connection doesn't send a valid header so the bridge can hang up sooner. This isn't
+    /// a security thing, just a "make it very likely you can log the right error" thing.
     magic: [u8; 8],
+    /// The protocol version being requested by the connection; the current version is
+    /// [`PROTOCOL_VERSION`].
     version: [u8; 4],
+    /// The [`Role`] of this connection; the bridge should listen on entirely different ports and so
+    /// it should know whether each connection is a client or a server. This exists primarily to
+    /// help catch mis-configurations where the client or server connects to the other's port on the
+    /// bridge.
     role: u8,
 }
 
@@ -163,167 +173,195 @@ impl From<Role> for ProtocolHeader {
     }
 }
 
+/// Each client request or server response starts with a frame that declares the payload's content
+/// type and size (in bytes).
+///
+/// TODO: if something like JSON doesn't work for all commands, we could do something where a
+/// request/response is a list of frames so they can have mixed content types. But I think JSON will
+/// be fine for everything, so let's keep it simple for now.
 struct Frame {
     content_type: ContentType,
     size: u64,
 }
 
-mod state {
-    /// Used for connections to the bridge that have not communicated with the server.
-    #[derive(Debug)]
-    pub struct New;
+// TODO Things the connection should have config for:
+//
+// Optional timeout for connection to bridge
+// Optional timeout for connection to server
+// Optional read/write timeout to server?
+// Optional buffer size for the ferry pipe? Probably not
+// The bridge address
+// The bridge SSL config (not optional)
+// The server SSL config (differs client vs server, but does this layer handle that?)
+//
+// Offer hook to send Stream to outer connection before proceeding with the inner connection (use for sending magic protocol header)
+// Everything else should be nothing to do with the Sigul protocol.
+//
+// After you build it, you should get yourself a normal thing that implements AsyncRead/AsyncWrite by using the inner impl, right?
 
-    pub struct Server;
-
-    pub struct Client;
-
-    /// Used for the connection to the bridge  
-    #[derive(Debug)]
-    pub(crate) struct Inner;
-
-    /// Used for connections that have sent their request to the server.
-    #[derive(Debug)]
-    pub(crate) struct InnerFinished;
+/// Build the configuration for a nested TLS session.
+pub struct NestlsBuilder {
+    bridge_ssl: Ssl,
+    bridge_payload: Option<bytes::Bytes>,
 }
 
-/// A connection that nests a TLS session within a TLS session.
-///
-/// This behaves like a normal TLS connection, except that it is proxied through a third party
-/// "bridge" which requires TLS with mutual TLS certificates.
-pub struct Nestls<State = state::New> {
+pub struct Nestls {
     /// The TLS connection to the Sigul server.
     inner_stream: SslStream<DuplexStream>,
     /// The task holding the TLS connection to the bridge.
     ferry_task: JoinHandle<Result<SslStream<TcpStream>, Error>>,
-    /// Tracks if this connection has communicated with the Sigul server yet.
-    state: std::marker::PhantomData<State>,
 }
 
-impl Nestls<state::New> {
-    /// Open a new connection to the Sigul bridge.
-    #[instrument(err, skip_all)]
-    pub async fn connect<A: ToSocketAddrs + std::fmt::Debug>(
-        bridge_addr: A,
-        bridge_ssl: Ssl,
-        server_ssl: Ssl,
-    ) -> Result<Nestls<state::Client>, Error> {
-        let outer_stream = Self::connect_to_bridge(bridge_addr, bridge_ssl, Role::Client).await?;
-
-        // Now establish the inner TLS session as a client
-        let (client_write_half, client_read_half) = tokio::io::duplex(1024 * 64);
-        let ferry_task = tokio::spawn(
-            async move {
-                let mut outer_stream = outer_stream;
-                let mut client_read_half = client_read_half;
-                let size = 1024 * 64;
-                let (client_sent_bytes, server_sent_bytes) =
-                    tokio::io::copy_bidirectional_with_sizes(
-                        &mut outer_stream,
-                        &mut client_read_half,
-                        size,
-                        size,
-                    )
-                    .await?;
-                tracing::info!(
-                    client_sent_bytes,
-                    server_sent_bytes,
-                    "inner TLS session completed"
-                );
-                Ok(outer_stream)
-            }
-            .in_current_span(),
-        );
-
-        let mut inner_stream = tokio_openssl::SslStream::new(server_ssl, client_write_half)?;
-        Pin::new(&mut inner_stream).connect().await?;
-        tracing::debug!("TLS session with the Sigul server established");
-
-        Ok(Nestls {
-            inner_stream,
-            ferry_task,
-            state: std::marker::PhantomData,
-        })
+impl Nestls {
+    pub fn builder(bridge_ssl: Ssl) -> NestlsBuilder {
+        NestlsBuilder::new(bridge_ssl)
     }
 
-    /// Act as a Siguldry server and accept new nested TLS sessions from the bridge.
     #[instrument(err, skip_all)]
-    pub async fn accept<A: ToSocketAddrs + std::fmt::Debug>(
-        bridge_addr: A,
-        bridge_ssl: Ssl,
-        server_tls_config: &ServerConfig,
-    ) -> Result<Nestls<state::Server>, Error> {
-        let outer_stream = Self::connect_to_bridge(bridge_addr, bridge_ssl, Role::Server).await?;
+    async fn into_outer(self) -> Result<SslStream<TcpStream>, Error> {
+        // It's important to drop the inner stream before attempting to join with the framing task,
+        // as this closes DuplexStream. Failing to do so causes the task to hang indefinitely.
+        drop(self.inner_stream);
+        self.ferry_task.await.expect("The ferry task panicked")
+    }
+}
 
-        let (client_write_half, client_read_half) = tokio::io::duplex(1024 * 1024);
-        let ferry_task = tokio::spawn(
-            async move {
-                let mut outer_stream = outer_stream;
-                let mut client_read_half = client_read_half;
-                let size = 1024 * 64;
-                let (client_sent_bytes, server_sent_bytes) =
-                    tokio::io::copy_bidirectional_with_sizes(
-                        &mut outer_stream,
-                        &mut client_read_half,
-                        size,
-                        size,
-                    )
-                    .await?;
-                tracing::info!(
-                    client_sent_bytes,
-                    server_sent_bytes,
-                    "inner TLS session completed"
-                );
-                Ok(outer_stream)
-            }
-            .in_current_span(),
-        );
+impl AsyncRead for Nestls {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        Pin::new(&mut self.as_mut().inner_stream).poll_read(cx, buf)
+    }
+}
 
-        let ssl = server_tls_config.ssl()?;
-        let mut inner_stream = tokio_openssl::SslStream::new(ssl, client_write_half)?;
-        Pin::new(&mut inner_stream).accept().await?;
-        tracing::debug!("Accepted new TLS connection from a client");
-
-        Ok(Nestls {
-            inner_stream,
-            ferry_task,
-            state: std::marker::PhantomData,
-        })
+impl AsyncWrite for Nestls {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<Result<usize, std::io::Error>> {
+        Pin::new(&mut self.as_mut().inner_stream).poll_write(cx, buf)
     }
 
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.as_mut().inner_stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.as_mut().inner_stream).poll_shutdown(cx)
+    }
+}
+
+impl NestlsBuilder {
+    /// Build a configuration for a [`Nestls`] connection.
+    pub fn new(bridge_ssl: Ssl) -> Self {
+        Self {
+            bridge_ssl,
+            bridge_payload: None,
+        }
+    }
+
+    /// Send these bytes to the bridge after establishing the TLS connection with it.
+    pub fn with_bridge_payload(mut self, payload: bytes::Bytes) -> Self {
+        self.bridge_payload = Some(payload);
+        self
+    }
+
+    #[instrument(err, skip_all)]
     async fn connect_to_bridge<A: ToSocketAddrs + std::fmt::Debug>(
         bridge_addr: A,
         bridge_ssl: Ssl,
-        role: Role,
+        payload: Option<bytes::Bytes>,
     ) -> Result<SslStream<TcpStream>, Error> {
         let outer_stream = TcpStream::connect(&bridge_addr).await?;
-        tracing::info!(
-            ?bridge_addr,
-            "TCP connection to the Sigul bridge established"
-        );
+        tracing::debug!(?bridge_addr, "TCP connection to the bridge established");
         let mut outer_stream = tokio_openssl::SslStream::new(bridge_ssl, outer_stream)?;
         Pin::new(&mut outer_stream).connect().await?;
-        tracing::info!("TLS session with the Sigul bridge established");
+        tracing::debug!("TLS session with the bridge established");
 
-        let hello: ProtocolHeader = role.into();
-        outer_stream.write_all(hello.as_bytes()).await?;
-        tracing::debug!(
-            protocol_version = PROTOCOL_VERSION,
-            ?role,
-            "Protocol header sent"
-        );
+        if let Some(payload) = payload {
+            outer_stream.write_all(&payload).await?;
+            tracing::debug!(bytes_sent = payload.len(), "Payload sent to the bridge")
+        }
 
+        tracing::info!(?bridge_addr, "Connection to the bridge established.");
         Ok(outer_stream)
     }
-}
 
-impl Nestls<state::Client> {
-    pub fn inner(&mut self) -> &mut SslStream<DuplexStream> {
-        &mut self.inner_stream
+    async fn ferry(
+        mut outer_stream: SslStream<TcpStream>,
+        mut inner_stream: DuplexStream,
+    ) -> Result<SslStream<TcpStream>, Error> {
+        let size = 1024 * 64;
+        let (client_sent_bytes, server_sent_bytes) = tokio::io::copy_bidirectional_with_sizes(
+            &mut outer_stream,
+            &mut inner_stream,
+            size,
+            size,
+        )
+        .await?;
+        tracing::info!(
+            client_sent_bytes,
+            server_sent_bytes,
+            "inner TLS session completed"
+        );
+        Ok(outer_stream)
     }
-}
 
-impl Nestls<state::Server> {
-    pub fn inner(&mut self) -> &mut SslStream<DuplexStream> {
-        &mut self.inner_stream
+    /// Connect to a nested TLS server.
+    #[instrument(err, skip(self, server_ssl))]
+    pub async fn connect<S: ToSocketAddrs + std::fmt::Debug>(
+        self,
+        bridge_addr: S,
+        server_ssl: Ssl,
+    ) -> Result<Nestls, Error> {
+        let outer_stream =
+            Self::connect_to_bridge(bridge_addr, self.bridge_ssl, self.bridge_payload).await?;
+
+        let (inner_stream, inner_stream_ferry) = tokio::io::duplex(1024 * 64);
+        let ferry_task =
+            tokio::spawn(Self::ferry(outer_stream, inner_stream_ferry).in_current_span());
+
+        let mut inner_stream = tokio_openssl::SslStream::new(server_ssl, inner_stream)?;
+        Pin::new(&mut inner_stream).connect().await?;
+        tracing::debug!("Inner TLS session with the server established");
+
+        Ok(Nestls {
+            inner_stream,
+            ferry_task,
+        })
+    }
+
+    /// Accept a new incoming nested TLS connection.
+    #[instrument(err, skip(self, server_tls_config))]
+    pub async fn accept<S: ToSocketAddrs + std::fmt::Debug>(
+        self,
+        bridge_addr: S,
+        server_tls_config: ServerConfig,
+    ) -> Result<Nestls, Error> {
+        let outer_stream =
+            Self::connect_to_bridge(bridge_addr, self.bridge_ssl, self.bridge_payload).await?;
+
+        let (inner_stream, inner_stream_ferry) = tokio::io::duplex(1024 * 64);
+        let ferry_task =
+            tokio::spawn(Self::ferry(outer_stream, inner_stream_ferry).in_current_span());
+
+        let ssl = server_tls_config.ssl()?;
+        let mut inner_stream = tokio_openssl::SslStream::new(ssl, inner_stream)?;
+        Pin::new(&mut inner_stream).accept().await?;
+        tracing::debug!("Accepted new inner TLS connection from a client");
+
+        Ok(Nestls {
+            inner_stream,
+            ferry_task,
+        })
     }
 }

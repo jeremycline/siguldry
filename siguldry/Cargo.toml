@@ -13,7 +13,8 @@ repository = "https://github.com/fedora-infra/siguldry"
 
 [features]
 default = []
-client-cli = ["clap", "tracing-subscriber", "tokio/fs"]
+client-cli = []
+#client-cli = ["clap", "tracing-subscriber", "tokio/fs"]
 
 
 [dependencies.anyhow]
@@ -44,7 +45,7 @@ features = ["macros", "net", "rt", "io-util", "time"]
 
 [dependencies.tokio-util]
 version = "0.7"
-features = ["io"]
+features = ["io", "rt"]
 
 [dependencies.tokio-openssl]
 version = "0.6"
@@ -56,12 +57,21 @@ version = "0.1.36"
 version = "0.3.17"
 default-features = false
 features = ["std", "registry", "fmt", "env-filter"]
-optional = true
+#optional = true
+
+[dependencies.zerocopy]
+version = "0.8"
+features = ["std", "derive"]
 
 
 [dev-dependencies]
 anyhow = "1"
 proptest = "1.6"
+tempfile = "3"
+
+[dev-dependencies.tokio]
+version = "1.27"
+features = ["process"]
 
 [dev-dependencies.pyo3]
 version = "0.25"
