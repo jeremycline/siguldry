@@ -1,4 +1,4 @@
-use std::{io::Read, path::Path};
+use std::{fmt::Debug, io::Read, path::Path};
 
 use crate::v2::error::ClientError as Error;
 
@@ -59,6 +59,12 @@ impl ClientConfig {
 #[derive(Clone)]
 pub struct ServerConfig {
     acceptor: SslAcceptor,
+}
+
+impl Debug for ServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerConfig").finish()
+    }
 }
 
 impl ServerConfig {

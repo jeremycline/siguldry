@@ -12,8 +12,9 @@
 //! connection to the bridge.
 //!
 //! A [`Nestls`] connection is capable of behaving as a client or a server. It does not
-//! implement the Siguldry protocol, and merely provides a socket over which the protocol can be
-//! implemented.
+//! implement the Siguldry protocol, it only provides a tunneled socket over which the
+//! protocol can be implemented. Refer to [`siguldry::v2::protocol`] for the higher-level
+//! protocol.
 
 //! Connect to a Sigul bridge and server.
 //!
@@ -107,82 +108,16 @@
 
 use std::pin::Pin;
 
-use bytes::BytesMut;
 use openssl::ssl::Ssl;
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt, DuplexStream},
     net::{TcpStream, ToSocketAddrs},
     task::JoinHandle,
 };
 use tokio_openssl::SslStream;
 use tracing::{instrument, Instrument};
-use zerocopy::{Immutable, IntoBytes, KnownLayout};
 
-use crate::{error::ConnectionError as Error, v2::tls::ServerConfig};
-
-/// Magic number used in the protocol header.
-pub const MAGIC: u64 = u64::from_le_bytes([83, 73, 71, 85, 76, 68, 82, 89]);
-/// The Sigul wire protocol version this implementation supports
-pub const PROTOCOL_VERSION: u32 = 2;
-
-enum ContentType {
-    InnerSsl,
-    Json,
-    Binary,
-}
-
-enum Recipient {
-    Client,
-    Server,
-    Bridge,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum Role {
-    Client,
-    Server,
-}
-
-#[derive(IntoBytes, Immutable, KnownLayout, Debug, Clone)]
-pub struct ProtocolHeader {
-    /// Each connection starts with a [`MAGIC`] number. While the version and role
-    /// also have a fairly restricted set of valid values, this makes it even more likely a random
-    /// incoming connection doesn't send a valid header so the bridge can hang up sooner. This isn't
-    /// a security thing, just a "make it very likely you can log the right error" thing.
-    magic: [u8; 8],
-    /// The protocol version being requested by the connection; the current version is
-    /// [`PROTOCOL_VERSION`].
-    version: [u8; 4],
-    /// The [`Role`] of this connection; the bridge should listen on entirely different ports and so
-    /// it should know whether each connection is a client or a server. This exists primarily to
-    /// help catch mis-configurations where the client or server connects to the other's port on the
-    /// bridge.
-    role: u8,
-}
-
-impl From<Role> for ProtocolHeader {
-    fn from(value: Role) -> Self {
-        Self {
-            magic: MAGIC.to_be_bytes(),
-            version: PROTOCOL_VERSION.to_be_bytes(),
-            role: match value {
-                Role::Client => 0_u8,
-                Role::Server => 1_u8,
-            },
-        }
-    }
-}
-
-/// Each client request or server response starts with a frame that declares the payload's content
-/// type and size (in bytes).
-///
-/// TODO: if something like JSON doesn't work for all commands, we could do something where a
-/// request/response is a list of frames so they can have mixed content types. But I think JSON will
-/// be fine for everything, so let's keep it simple for now.
-struct Frame {
-    content_type: ContentType,
-    size: u64,
-}
+use crate::v2::{error::ConnectionError as Error, tls::ServerConfig};
 
 // TODO Things the connection should have config for:
 //
@@ -205,6 +140,9 @@ pub struct NestlsBuilder {
     bridge_payload: Option<bytes::Bytes>,
 }
 
+/// A nested TLS session.
+///
+/// Use [`AsyncRead`] and [`AsyncWrite`] to read and write to the inner TLS session.
 pub struct Nestls {
     /// The TLS connection to the Sigul server.
     inner_stream: SslStream<DuplexStream>,
@@ -213,6 +151,10 @@ pub struct Nestls {
 }
 
 impl Nestls {
+    /// Get a [`NestlsBuilder`] to configure the connection details.
+    ///
+    /// Once the connection has been configured, you can create a [`Nestls`] instance by calling
+    /// [`NestlsBuilder::connect`] or [`NestlsBuilder::accept`].
     pub fn builder(bridge_ssl: Ssl) -> NestlsBuilder {
         NestlsBuilder::new(bridge_ssl)
     }

@@ -1,7 +1,13 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) Microsoft Corporation.
+
 use std::path::PathBuf;
 
 use anyhow::{bail, Context};
-use siguldry::v2::connection::{NestlsBuilder, ProtocolHeader, Role};
+use siguldry::v2::{
+    nestls::NestlsBuilder,
+    protocol::{ProtocolHeader, Role},
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     process::Command,
