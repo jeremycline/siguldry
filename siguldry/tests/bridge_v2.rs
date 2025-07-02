@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use anyhow::{bail, Context};
 use siguldry::v2::{
     nestls::NestlsBuilder,
-    protocol::{ProtocolHeader, Role},
+    client,
+    server
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -49,51 +50,40 @@ async fn basic_bridge_config() -> anyhow::Result<()> {
         creds_directory.join("sigul.ca.certificate.pem"),
     )
     .context("Failed to load bridge credentials")?;
-    let halt_token = CancellationToken::new();
-    let listener = tokio::spawn(siguldry::v2::bridge::listen(
-        "127.0.0.1:8080",
-        "127.0.0.1:8081",
+    let bridge_halt_token = CancellationToken::new();
+    let client_bridge_addr = "127.0.0.1:8080";
+    let server_bridge_addr = "127.0.0.1:8081";
+    let bridge_task = tokio::spawn(siguldry::v2::bridge::listen(
+        client_bridge_addr,
+        server_bridge_addr,
         bridge_tls_config,
-        halt_token.clone(),
+        bridge_halt_token.clone(),
     ));
 
-    let tls_config = siguldry::v2::tls::ClientConfig::new(
+    let client_tls_config = siguldry::v2::tls::ClientConfig::new(
         creds_directory.join("sigul.client.certificate.pem"),
         creds_directory.join("sigul.client.private_key.pem"),
         None,
         creds_directory.join("sigul.ca.certificate.pem"),
     )?;
-    let bridge_payload: ProtocolHeader = Role::Client.into();
-    let conn = NestlsBuilder::new(tls_config.ssl("sigul-bridge")?)
-        .with_bridge_payload(bytes::Bytes::copy_from_slice(bridge_payload.as_bytes()))
-        .connect("sigul-bridge:8080", tls_config.ssl("sigul-server")?);
-    let client = tokio::spawn(conn);
-
     let server_tls_config = siguldry::v2::tls::ServerConfig::new(
         creds_directory.join("sigul.server.certificate.pem"),
         creds_directory.join("sigul.server.private_key.pem"),
         None,
         creds_directory.join("sigul.ca.certificate.pem"),
     )?;
-    let bridge_payload: ProtocolHeader = Role::Server.into();
-    let conn = NestlsBuilder::new(tls_config.ssl("sigul-bridge")?)
-        .with_bridge_payload(bytes::Bytes::copy_from_slice(bridge_payload.as_bytes()))
-        .accept("sigul-bridge:8081", server_tls_config);
-    let server = tokio::spawn(conn);
+    let client = client::Client::new(client_tls_config.clone(), client_bridge_addr, "sigul-bridge".into(), "sigul-server".into());
+    let server_halt_token = CancellationToken::new();
+    let server = server::Server::new(client_tls_config, server_tls_config, server_bridge_addr, "sigul-bridge".into(), server_halt_token.clone());
+    let server_task = tokio::spawn(server.run());
 
-    let mut client = client.await??;
-    let mut server = server.await??;
-    client.write_all(&[1, 2, 3]).await?;
-    drop(client);
+    let response = client.hello().await.unwrap();
+    assert_eq!(response.user, "whoever you are");
 
-    let mut buf = [0_u8; 3];
-    server.read_exact(&mut buf).await?;
-    drop(server);
-
-    assert_eq!(buf, [1, 2, 3]);
-
-    halt_token.cancel();
-    listener.await?;
+    server_halt_token.cancel();
+    bridge_halt_token.cancel();
+    server_task.await?;
+    bridge_task.await?;
 
     Ok(())
 }

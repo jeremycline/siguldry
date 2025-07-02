@@ -40,23 +40,29 @@
 //! |--------------------------|
 //! |      Frame Header        |
 //! |--------------------------|
-//! | u32 | Content-Type       |
 //! | u64 | Frame size (bytes) |
+//! | u8  | Content-Type       |
 //! |--------------------------|
 //!
-//! The content type is represented as a u32; refer to [`ContentType`] for examples.  The frame size
+//! The content type is represented as a u8; refer to [`ContentType`] for examples.  The frame size
 //! is an unsigned 64 bit integer.
 
-use zerocopy::{Immutable, IntoBytes, KnownLayout};
+use serde::{Deserialize, Serialize};
+use zerocopy::{
+    byteorder::network_endian::{U32, U64},
+    Immutable, IntoBytes, KnownLayout, TryFromBytes,
+};
 
 /// Magic number used in the protocol header.
-pub const MAGIC: u64 = u64::from_le_bytes([83, 73, 71, 85, 76, 68, 82, 89]);
+pub const MAGIC: U64 = U64::from_bytes([83, 73, 71, 85, 76, 68, 82, 89]);
 /// The Sigul wire protocol version this implementation supports
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: U32 = U32::new(2);
 
-enum ContentType {
-    Json,
-    Binary,
+#[derive(IntoBytes, Immutable, KnownLayout, TryFromBytes, Debug, Clone, Copy)]
+#[repr(u8)]
+pub(crate) enum ContentType {
+    Json = 0,
+    Binary = 1,
 }
 
 /// The possible roles a connection can have.
@@ -65,50 +71,47 @@ enum ContentType {
 /// connections and server connections, but it is easy to misconfigure the client, server, or bridge
 /// such that a client connects to the server port or vice versa. This header field exists to ensure
 /// such misconfigurations are clearly reported by the bridge.
-#[derive(Debug, Clone, Copy)]
+#[derive(IntoBytes, Immutable, KnownLayout, TryFromBytes, Debug, Clone, Copy)]
+#[repr(u8)]
 pub enum Role {
     /// Clients should use this role in their protocol header.
-    Client,
+    Client = 0,
     /// Server should use this role in their protocol header.
-    Server,
+    Server = 1,
 }
 
 /// Every connection to the bridge begins with a protocol header to announce the version it expects
 /// to use as well as the [`Role`] it intends to take.
 #[derive(IntoBytes, Immutable, KnownLayout, Debug, Clone)]
-pub struct ProtocolHeader {
+pub(crate) struct ProtocolHeader {
     /// Each connection starts with a [`MAGIC`] number. While the version and role also have a fairly
     /// restricted set of valid values, this makes it even more likely a random incoming connection
     /// doesn't send a valid header so the bridge can hang up sooner. This isn't a security thing, just
     /// a "make it very likely you can log the right error" thing.
-    magic: [u8; 8],
+    magic: U64,
     /// The protocol version being requested by the connection; the current version is
     /// [`PROTOCOL_VERSION`].
-    version: [u8; 4],
+    version: U32,
     /// The [`Role`] of this connection; the bridge should listen on entirely different ports and so it
     /// should know whether each connection is a client or a server. This exists primarily to help catch
     /// mis-configurations where the client or server connects to the other's port on the bridge.
-    role: u8,
+    role: Role,
 }
 
-impl TryFrom<&[u8]> for ProtocolHeader {
-    type Error = crate::v2::error::ClientError;
-
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        todo!()
+impl ProtocolHeader {
+    /// Create a new protocol header for the given role.
+    pub fn new(role: Role) -> Self {
+        Self {
+            magic: MAGIC,
+            version: PROTOCOL_VERSION,
+            role,
+        }
     }
 }
 
 impl From<Role> for ProtocolHeader {
-    fn from(value: Role) -> Self {
-        Self {
-            magic: MAGIC.to_be_bytes(),
-            version: PROTOCOL_VERSION.to_be_bytes(),
-            role: match value {
-                Role::Client => 0_u8,
-                Role::Server => 1_u8,
-            },
-        }
+    fn from(role: Role) -> Self {
+        ProtocolHeader::new(role)
     }
 }
 
@@ -118,7 +121,33 @@ impl From<Role> for ProtocolHeader {
 /// TODO: if something like JSON doesn't work for all commands, we could do something where a
 /// request/response is a list of frames so they can have mixed content types. But I think JSON will
 /// be fine for everything, so let's keep it simple for now.
-struct Frame {
-    content_type: ContentType,
-    size: u64,
+#[derive(IntoBytes, Immutable, KnownLayout, TryFromBytes, Debug, Clone)]
+pub(crate) struct Frame {
+    pub(crate) size: U64,
+    pub(crate) content_type: ContentType,
+}
+
+impl Frame {
+    /// Create a new frame.
+    pub fn new(size: u64, content_type: ContentType) -> Self {
+        Self {
+            size: U64::new(size),
+            content_type,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) enum Request {
+    Hello {},
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) enum Response {
+    Hello { user: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct Hello {
+    pub user: String
 }

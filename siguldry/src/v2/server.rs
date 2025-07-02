@@ -3,13 +3,19 @@
 
 //! A sigul server.
 
-use tokio::net::ToSocketAddrs;
-use zerocopy::IntoBytes;
+use bytes::{BufMut, BytesMut};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::ToSocketAddrs,
+};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tracing::{instrument, Instrument};
+use zerocopy::{IntoBytes, TryFromBytes};
 
 use crate::v2::{
     error::{ClientError as Error, ConnectionError},
     nestls::{Nestls, NestlsBuilder},
-    protocol::{ProtocolHeader, Role},
+    protocol::{self, ContentType, ProtocolHeader, Request, Response, Role},
     tls,
 };
 
@@ -20,20 +26,48 @@ pub struct Server<S: ToSocketAddrs + std::fmt::Debug> {
     server_tls_config: tls::ServerConfig,
     bridge_address: S,
     bridge_hostname: String,
+    halt_token: CancellationToken,
 }
 
 impl<S: ToSocketAddrs + std::fmt::Debug> Server<S> {
+    /// Create a new server.
     pub fn new(
         tls_config: tls::ClientConfig,
         server_tls_config: tls::ServerConfig,
         bridge_address: S,
         bridge_hostname: String,
+        halt_token: CancellationToken,
     ) -> Self {
         Self {
             tls_config,
             server_tls_config,
             bridge_address,
             bridge_hostname,
+            halt_token,
+        }
+    }
+
+    /// Run the server.
+    #[instrument(skip_all)]
+    pub async fn run(self) {
+        let request_tracker = TaskTracker::new();
+
+        'accept: loop {
+            tokio::select! {
+                _ = self.halt_token.cancelled() => {
+                    tracing::info!("Shutdown requested, no new requests will be accepted");
+                    break 'accept;
+                },
+                conn = self.accept() => {
+                    match conn {
+                        Ok(conn) => {
+                            tracing::info!("New request accepted");
+                            request_tracker.spawn(handle(conn).instrument(tracing::Span::current()));
+                        },
+                        Err(error) => tracing::error!(?error, "Failed to accept incoming client connection"),
+                    }
+                },
+            }
         }
     }
 
@@ -46,4 +80,46 @@ impl<S: ToSocketAddrs + std::fmt::Debug> Server<S> {
 
         Ok(conn)
     }
+}
+
+async fn handle(mut conn: Nestls) -> Result<(), Error> {
+    // Read request frame
+    // parse request
+    // dispatch to handler
+    // TODO test out this flow with tower
+
+    let mut frame_buffer = [0_u8; std::mem::size_of::<protocol::Frame>()];
+    conn.read_exact(&mut frame_buffer).await?;
+    let frame = protocol::Frame::try_ref_from_bytes(&frame_buffer).unwrap();
+    tracing::info!(?frame, "New frame received");
+
+    let frame_size: usize = frame.size.get().try_into().unwrap();
+    let mut request_buffer = BytesMut::with_capacity(frame_size).limit(frame_size);
+    while request_buffer.remaining_mut() != 0 {
+        conn.read_buf(&mut request_buffer).await?;
+    }
+
+    let request_bytes = request_buffer.into_inner().freeze();
+    match frame.content_type {
+        ContentType::Json => {
+            let request: Request = serde_json::from_slice(&request_bytes).unwrap();
+            match request {
+                Request::Hello {} => {
+                    let response = serde_json::to_string(&Response::Hello {
+                        user: "whoever you are".to_string(),
+                    })
+                    .unwrap();
+                    let response_frame = protocol::Frame::new(
+                        response.as_bytes().len().try_into().unwrap(),
+                        protocol::ContentType::Json,
+                    );
+                    conn.write_all(response_frame.as_bytes()).await?;
+                    conn.write_all(response.as_bytes()).await?;
+                }
+            }
+        }
+        ContentType::Binary => todo!(),
+    }
+
+    Ok(())
 }
