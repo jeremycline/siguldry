@@ -3,6 +3,8 @@
 
 //! A variety of errors that might occur when using the Sigul client.
 
+use zerocopy::TryCastError;
+
 /// Errors the [`crate::client::Client`] may return.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -199,4 +201,13 @@ pub enum ConnectionError {
     /// Retrying might succeed, but this is a bug and should be reported.
     #[error("a Sigul protocol violation occurred: {0}")]
     ProtocolViolation(String),
+}
+
+impl<S, D> From<TryCastError<S, D>> for ConnectionError
+where
+    D: zerocopy::TryFromBytes,
+{
+    fn from(value: TryCastError<S, D>) -> Self {
+        Self::ProtocolViolation(format!("{:?}", value))
+    }
 }

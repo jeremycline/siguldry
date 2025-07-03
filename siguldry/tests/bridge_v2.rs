@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) Microsoft Corporation.
 
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 use anyhow::{bail, Context};
 use siguldry::v2::{
+    client::{self, RetryPolicy},
     nestls::NestlsBuilder,
-    client,
-    server
+    protocol, server,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     process::Command,
+};
+use tower::{
+    retry::backoff::MakeBackoff, util::rng::HasherRng, Service, ServiceBuilder, ServiceExt,
 };
 use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, EnvFilter};
 use zerocopy::IntoBytes;
@@ -72,13 +75,32 @@ async fn basic_bridge_config() -> anyhow::Result<()> {
         None,
         creds_directory.join("sigul.ca.certificate.pem"),
     )?;
-    let client = client::Client::new(client_tls_config.clone(), client_bridge_addr, "sigul-bridge".into(), "sigul-server".into());
+    let client_service = client::ClientService::new(
+        client_tls_config.clone(),
+        client_bridge_addr.to_string(),
+        "sigul-bridge".into(),
+        "sigul-server".into(),
+    );
+    let policy = RetryPolicy::new();
+    let mut client = ServiceBuilder::new()
+        .retry(policy)
+        .timeout(Duration::from_secs(30))
+        .service(client_service);
+
     let server_halt_token = CancellationToken::new();
-    let server = server::Server::new(client_tls_config, server_tls_config, server_bridge_addr, "sigul-bridge".into(), server_halt_token.clone());
+    let server = server::Server::new(
+        client_tls_config,
+        server_tls_config,
+        server_bridge_addr,
+        "sigul-bridge".into(),
+        server_halt_token.clone(),
+    );
     let server_task = tokio::spawn(server.run());
 
-    let response = client.hello().await.unwrap();
-    assert_eq!(response.user, "whoever you are");
+    let response = client.call(protocol::Request::Hello {}).await.unwrap();
+    match response {
+        protocol::Response::Hello { user } => assert_eq!(user, "whoever you are"),
+    }
 
     server_halt_token.cancel();
     bridge_halt_token.cancel();

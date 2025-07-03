@@ -8,8 +8,9 @@ use tokio::{
 use tokio_openssl::SslStream;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{instrument, Instrument};
+use zerocopy::TryFromBytes;
 
-use crate::v2::tls::ServerConfig;
+use crate::v2::{protocol, tls::ServerConfig};
 
 async fn accept_conn(tcp_listener: &TcpListener, ssl: Ssl) -> SslStream<TcpStream> {
     let (tcp_stream, client_addr) = tcp_listener.accept().await.unwrap();
@@ -95,14 +96,8 @@ async fn bridge(
     // it wants, but concludes when either side sends the "I'm done" message to the bridge.
     //
     // Each request has an id that spans client/bridge/server
-
-    // TODO READ HEADER
-    let mut client_header = [0_u8; 13];
-    _ = client_conn.read_exact(&mut client_header).await?;
-    tracing::info!(?client_header, "client header received");
-    let mut server_header = [0_u8; 13];
-    _ = server_conn.read_exact(&mut server_header).await?;
-    tracing::info!(?server_header, "client header received");
+    protocol::ProtocolHeader::check(&mut client_conn, protocol::Role::Client).await?;
+    protocol::ProtocolHeader::check(&mut server_conn, protocol::Role::Server).await?;
 
     let size = 1024 * 64;
     let (client_sent_bytes, server_sent_bytes) =

@@ -47,11 +47,25 @@
 //! The content type is represented as a u8; refer to [`ContentType`] for examples.  The frame size
 //! is an unsigned 64 bit integer.
 
+use std::{
+    future::Future,
+    pin::Pin,
+    time::{Duration, Instant},
+};
+
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tower::{
+    retry::backoff::{Backoff, ExponentialBackoff, MakeBackoff},
+    util::rng::HasherRng,
+};
 use zerocopy::{
     byteorder::network_endian::{U32, U64},
     Immutable, IntoBytes, KnownLayout, TryFromBytes,
 };
+
+use crate::v2::error::{ClientError, ConnectionError};
 
 /// Magic number used in the protocol header.
 pub const MAGIC: U64 = U64::from_bytes([83, 73, 71, 85, 76, 68, 82, 89]);
@@ -71,7 +85,7 @@ pub(crate) enum ContentType {
 /// connections and server connections, but it is easy to misconfigure the client, server, or bridge
 /// such that a client connects to the server port or vice versa. This header field exists to ensure
 /// such misconfigurations are clearly reported by the bridge.
-#[derive(IntoBytes, Immutable, KnownLayout, TryFromBytes, Debug, Clone, Copy)]
+#[derive(IntoBytes, Immutable, KnownLayout, TryFromBytes, Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Role {
     /// Clients should use this role in their protocol header.
@@ -82,7 +96,7 @@ pub enum Role {
 
 /// Every connection to the bridge begins with a protocol header to announce the version it expects
 /// to use as well as the [`Role`] it intends to take.
-#[derive(IntoBytes, Immutable, KnownLayout, Debug, Clone)]
+#[derive(IntoBytes, Immutable, KnownLayout, TryFromBytes, Debug, Clone)]
 pub(crate) struct ProtocolHeader {
     /// Each connection starts with a [`MAGIC`] number. While the version and role also have a fairly
     /// restricted set of valid values, this makes it even more likely a random incoming connection
@@ -100,11 +114,40 @@ pub(crate) struct ProtocolHeader {
 
 impl ProtocolHeader {
     /// Create a new protocol header for the given role.
-    pub fn new(role: Role) -> Self {
+    pub(crate) fn new(role: Role) -> Self {
         Self {
             magic: MAGIC,
             version: PROTOCOL_VERSION,
             role,
+        }
+    }
+
+    pub(crate) async fn check<C: AsyncRead + Unpin>(
+        conn: &mut C,
+        expected_role: Role,
+    ) -> Result<(), ConnectionError> {
+        let mut header_buf = [0_u8; std::mem::size_of::<Self>()];
+        conn.read_exact(&mut header_buf).await?;
+        let header = Self::try_ref_from_bytes(&header_buf)?;
+
+        if header.magic != MAGIC {
+            Err(ConnectionError::ProtocolViolation(format!(
+                "Protocol header magic number '{}' did not match expected '{MAGIC}'",
+                header.magic
+            )))
+        } else if header.version != PROTOCOL_VERSION {
+            Err(ConnectionError::ProtocolViolation(format!(
+                "Protocol header version number '{}' did not match expected '{PROTOCOL_VERSION}'",
+                header.version
+            )))
+        } else if header.role != expected_role {
+            Err(ConnectionError::ProtocolViolation(format!(
+                "Protocol header role '{:?}' did not match expected '{expected_role:?}'",
+                header.role
+            )))
+        } else {
+            tracing::debug!(header=?header, "Protocol header passed validation");
+            Ok(())
         }
     }
 }
@@ -138,16 +181,22 @@ impl Frame {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) enum Request {
+pub enum Request {
     Hello {},
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) enum Response {
+pub enum Response {
     Hello { user: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StructResponse {
+    command: String,
+    response: Value,
 }
 
 #[derive(Debug, Clone)]
 pub struct Hello {
-    pub user: String
+    pub user: String,
 }

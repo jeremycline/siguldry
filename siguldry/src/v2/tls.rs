@@ -48,7 +48,7 @@ impl ClientConfig {
     }
 
     /// Retrieve an SSL configuration acceptable to use when connecting to the provided hostname.
-    pub fn ssl(&self, hostname: &str) -> Result<openssl::ssl::Ssl, Error> {
+    pub(crate) fn ssl(&self, hostname: &str) -> Result<openssl::ssl::Ssl, ErrorStack> {
         let ssl = self.connector.configure()?.into_ssl(hostname)?;
         tracing::debug!(verify_mode=?ssl.ssl_context().verify_mode(), hostname=hostname, "Created SSL connection config");
         Ok(ssl)

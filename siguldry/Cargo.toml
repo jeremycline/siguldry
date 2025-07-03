@@ -53,6 +53,10 @@ features = ["io", "rt"]
 [dependencies.tokio-openssl]
 version = "0.6"
 
+[dependencies.tower]
+version = "0.5"
+features = ["make", "retry", "timeout", "util"]
+
 [dependencies.tracing]
 version = "0.1.36"
 
@@ -82,8 +86,6 @@ features = ["auto-initialize"]
 
 # As we use OpenSSL for the TLS connection, let's stick with it for this as well.
 # The upstream default engine is nettle.
-#
-# Bump to 2.0 once Rust 1.85 is available (November 2025)
 [dev-dependencies.sequoia-openpgp]
 version = "2"
 default-features = false
