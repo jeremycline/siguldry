@@ -278,6 +278,8 @@ pub(crate) struct Frame {
     pub(crate) content_type: ContentType,
 }
 
+// TODO maybe don't be fancy. Request responses always need to be JSON, and optionally can have an arbitrary command-specific bag of bytes following it
+
 impl Frame {
     /// Create a new frame.
     pub fn new(size: u64, content_type: ContentType) -> Self {

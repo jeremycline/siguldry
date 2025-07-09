@@ -85,7 +85,7 @@ async fn basic_bridge_config() -> anyhow::Result<()> {
         creds_directory.join("sigul.ca.certificate.pem"),
     )?;
     let server_halt_token = CancellationToken::new();
-    let server = server::Server::new(
+    let server = server::service::Server::new(
         server_client_tls_config,
         server_tls_config,
         server_bridge_addr,

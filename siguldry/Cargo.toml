@@ -12,8 +12,9 @@ keywords = ["pesign", "sigul", "fedora"]
 repository = "https://github.com/fedora-infra/siguldry"
 
 [features]
-default = []
+default = ["server-v2"]
 client-cli = []
+server-v2 = ["sqlx"]
 #client-cli = ["clap", "tracing-subscriber", "tokio/fs"]
 
 
@@ -39,6 +40,11 @@ features = ["derive"]
 [dependencies.serde_json]
 version = "1"
 
+[dependencies.sqlx]
+version = "0.8"
+features = ["runtime-tokio", "sqlite-unbundled", "macros", "migrate"]
+optional = true
+
 [dependencies.thiserror]
 version = "2"
 
@@ -55,7 +61,7 @@ version = "0.6"
 
 [dependencies.tower]
 version = "0.5"
-features = ["buffer", "make", "retry", "reconnect", "timeout", "util"]
+features = ["make", "retry", "reconnect", "timeout", "util"]
 
 [dependencies.tracing]
 version = "0.1.36"
