@@ -29,7 +29,7 @@ pub fn from_bytes(input: &[u8]) -> Result<HashMap<String, Vec<u8>>> {
         tracing::trace!(field_id, "Expecting key to be {} bytes long", key_length);
         let mut key = vec![];
         while key.len() < key_length.into() {
-            key.push(*input.next().ok_or(Error::MissingBytes)?)
+            key.push(*input.next().ok_or(Error::MissingBytes)?);
         }
         let key = String::from_utf8(key)
             .map_err(|err| Error::Message(format!("Invalid UTF-8 used in key: {err:?}")))?;
@@ -42,7 +42,7 @@ pub fn from_bytes(input: &[u8]) -> Result<HashMap<String, Vec<u8>>> {
             value_length
         );
         while value.len() < value_length.into() {
-            value.push(*input.next().ok_or(Error::MissingBytes)?)
+            value.push(*input.next().ok_or(Error::MissingBytes)?);
         }
 
         map.insert(key, value);

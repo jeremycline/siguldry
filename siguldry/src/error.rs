@@ -64,6 +64,9 @@ pub enum ClientError {
 
 /// Status codes returned by the Sigul Server.
 #[derive(Debug, thiserror::Error)]
+// Clippy: Sigul 1.2 is the final version using this error protocol and the enumeration will not be
+// expanded.
+#[allow(clippy::exhaustive_enums)]
 pub enum Sigul {
     /// The protocol version is not known to the server.
     #[error("unknown protocol version")]

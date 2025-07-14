@@ -335,9 +335,7 @@ async fn key_user_info_self_owner() -> anyhow::Result<()> {
         .delete_key("my-admin-password".into(), key_name.clone())
         .await;
     if cleanup.is_err() && !matches!(cleanup, Err(ClientError::Sigul(Sigul::KeyNotFound))) {
-        panic!(
-            "unexpected Sigul error while cleaning up, got {cleanup:?}"
-        )
+        panic!("unexpected Sigul error while cleaning up, got {cleanup:?}")
     }
 
     let key = client
@@ -382,9 +380,7 @@ async fn key_user_info_other_owner() -> anyhow::Result<()> {
         .delete_key("my-admin-password".into(), key_name.clone())
         .await;
     if cleanup_key.is_err() && !matches!(cleanup_key, Err(ClientError::Sigul(Sigul::KeyNotFound))) {
-        panic!(
-            "unexpected Sigul error while cleaning up, got {cleanup_key:?}"
-        )
+        panic!("unexpected Sigul error while cleaning up, got {cleanup_key:?}")
     }
     let cleanup_user = client
         .delete_user("my-admin-password".into(), test_user.clone())
@@ -396,12 +392,7 @@ async fn key_user_info_other_owner() -> anyhow::Result<()> {
     }
 
     client
-        .create_user(
-            "my-admin-password".into(),
-            test_user.to_string(),
-            false,
-            None,
-        )
+        .create_user("my-admin-password".into(), test_user.clone(), false, None)
         .await?;
     let key = client
         .new_key(
@@ -457,9 +448,7 @@ async fn modify_key_user_demote_promote() -> anyhow::Result<()> {
         .delete_key("my-admin-password".into(), key_name.clone())
         .await;
     if cleanup_key.is_err() && !matches!(cleanup_key, Err(ClientError::Sigul(Sigul::KeyNotFound))) {
-        panic!(
-            "unexpected Sigul error while cleaning up, got {cleanup_key:?}"
-        )
+        panic!("unexpected Sigul error while cleaning up, got {cleanup_key:?}")
     }
     let cleanup_user = client
         .delete_user("my-admin-password".into(), test_user.clone())
@@ -471,12 +460,7 @@ async fn modify_key_user_demote_promote() -> anyhow::Result<()> {
     }
 
     client
-        .create_user(
-            "my-admin-password".into(),
-            test_user.to_string(),
-            false,
-            None,
-        )
+        .create_user("my-admin-password".into(), test_user.clone(), false, None)
         .await?;
     let key = client
         .new_key(
@@ -783,7 +767,7 @@ pub async fn key_rsa_import() -> anyhow::Result<()> {
     let key = rsa::Rsa::generate(2048)?;
     let pem = key.private_key_to_pem_passphrase(
         openssl::symm::Cipher::aes_128_cbc(),
-        "my-key-passphrase".as_bytes(),
+        b"my-key-passphrase",
     )?;
 
     client
@@ -827,7 +811,7 @@ pub async fn key_ecc_import() -> anyhow::Result<()> {
     )?;
     let pem = key.private_key_to_pem_passphrase(
         openssl::symm::Cipher::aes_128_cbc(),
-        "my-key-passphrase".as_bytes(),
+        b"my-key-passphrase",
     )?;
 
     client
@@ -872,7 +856,7 @@ pub async fn key_ecc_import_as_rsa() -> anyhow::Result<()> {
     )?;
     let pem = key.private_key_to_pem_passphrase(
         openssl::symm::Cipher::aes_128_cbc(),
-        "my-key-passphrase".as_bytes(),
+        b"my-key-passphrase",
     )?;
 
     let failure = client
@@ -1249,17 +1233,13 @@ pub async fn code_signing_certificate() -> anyhow::Result<()> {
         .delete_key("my-admin-password".into(), ca_key_name.clone())
         .await;
     if cleanup.is_err() && !matches!(cleanup, Err(ClientError::Sigul(Sigul::KeyNotFound))) {
-        panic!(
-            "unexpected Sigul error while cleaning up, got {cleanup:?}"
-        )
+        panic!("unexpected Sigul error while cleaning up, got {cleanup:?}")
     }
     let cleanup = client
         .delete_key("my-admin-password".into(), code_signing_key_name.clone())
         .await;
     if cleanup.is_err() && !matches!(cleanup, Err(ClientError::Sigul(Sigul::KeyNotFound))) {
-        panic!(
-            "unexpected Sigul error while cleaning up, got {cleanup:?}"
-        )
+        panic!("unexpected Sigul error while cleaning up, got {cleanup:?}")
     }
 
     // Create the CA and code signing keys
@@ -1275,7 +1255,7 @@ pub async fn code_signing_certificate() -> anyhow::Result<()> {
     let code_signing_key = rsa::Rsa::generate(2048)?;
     let pem = code_signing_key.private_key_to_pem_passphrase(
         openssl::symm::Cipher::aes_128_cbc(),
-        "my-key-passphrase".as_bytes(),
+        b"my-key-passphrase",
     )?;
     client
         .import_key(

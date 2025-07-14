@@ -173,7 +173,7 @@ impl HmacKeys {
     }
 
     /// Get a new signer instance to use when streaming the response payload.
-    fn payload_signer(&self) -> Result<openssl::sign::Signer, Error> {
+    fn payload_signer(&self) -> Result<openssl::sign::Signer<'_>, Error> {
         let key = openssl::pkey::PKey::hmac(&self.payload_key)?;
         // TODO: really should just wrap this up in a type
         Ok(openssl::sign::Signer::new(MessageDigest::sha512(), &key)?)
@@ -181,7 +181,7 @@ impl HmacKeys {
 
     /// Finish validating a payload that was streamed to the signer.
     fn validate_payload_signer(
-        signer: openssl::sign::Signer,
+        signer: openssl::sign::Signer<'_>,
         signature: &[u8],
     ) -> Result<(), crate::error::ClientError> {
         let hmac = signer.sign_to_vec()?;

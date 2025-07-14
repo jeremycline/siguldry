@@ -67,10 +67,10 @@ async fn main() -> Result<(), anyhow::Error> {
 /// before the process shuts down.
 async fn signal_handler(halt_token: CancellationToken) -> Result<(), anyhow::Error> {
     let mut sigterm_stream = signal(SignalKind::terminate()).inspect_err(|error| {
-        tracing::error!(?error, "Failed to register a SIGTERM signal handler")
+        tracing::error!(?error, "Failed to register a SIGTERM signal handler");
     })?;
     let mut sigint_stream = signal(SignalKind::interrupt()).inspect_err(|error| {
-        tracing::error!(?error, "Failed to register a SIGINT signal handler")
+        tracing::error!(?error, "Failed to register a SIGINT signal handler");
     })?;
 
     loop {

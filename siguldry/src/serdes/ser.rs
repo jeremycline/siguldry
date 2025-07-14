@@ -89,7 +89,7 @@ impl ser::Serializer for &mut Serializer {
     fn serialize_i8(self, v: i8) -> std::result::Result<Self::Ok, Self::Error> {
         self.output.push(size_of::<u32>()?);
         for byte in (v as u32).to_be_bytes() {
-            self.output.push(byte)
+            self.output.push(byte);
         }
 
         Ok(())
@@ -98,7 +98,7 @@ impl ser::Serializer for &mut Serializer {
     fn serialize_i16(self, v: i16) -> std::result::Result<Self::Ok, Self::Error> {
         self.output.push(size_of::<u32>()?);
         for byte in (v as u32).to_be_bytes() {
-            self.output.push(byte)
+            self.output.push(byte);
         }
 
         Ok(())
@@ -107,7 +107,7 @@ impl ser::Serializer for &mut Serializer {
     fn serialize_i32(self, v: i32) -> std::result::Result<Self::Ok, Self::Error> {
         self.output.push(size_of::<u32>()?);
         for byte in (v as u32).to_be_bytes() {
-            self.output.push(byte)
+            self.output.push(byte);
         }
 
         Ok(())
@@ -116,7 +116,7 @@ impl ser::Serializer for &mut Serializer {
     fn serialize_i64(self, v: i64) -> std::result::Result<Self::Ok, Self::Error> {
         self.output.push(size_of::<i64>()?);
         for byte in v.to_be_bytes() {
-            self.output.push(byte)
+            self.output.push(byte);
         }
 
         Ok(())
@@ -130,7 +130,7 @@ impl ser::Serializer for &mut Serializer {
     fn serialize_u16(self, v: u16) -> std::result::Result<Self::Ok, Self::Error> {
         self.output.push(size_of::<u32>()?);
         for byte in (v as u32).to_be_bytes() {
-            self.output.push(byte)
+            self.output.push(byte);
         }
 
         Ok(())
@@ -139,7 +139,7 @@ impl ser::Serializer for &mut Serializer {
     fn serialize_u32(self, v: u32) -> std::result::Result<Self::Ok, Self::Error> {
         self.output.push(size_of::<u32>()?);
         for byte in v.to_be_bytes() {
-            self.output.push(byte)
+            self.output.push(byte);
         }
 
         Ok(())
@@ -148,7 +148,7 @@ impl ser::Serializer for &mut Serializer {
     fn serialize_u64(self, v: u64) -> std::result::Result<Self::Ok, Self::Error> {
         self.output.push(size_of::<u64>()?);
         for byte in v.to_be_bytes() {
-            self.output.push(byte)
+            self.output.push(byte);
         }
 
         Ok(())
@@ -157,7 +157,7 @@ impl ser::Serializer for &mut Serializer {
     fn serialize_f32(self, v: f32) -> std::result::Result<Self::Ok, Self::Error> {
         self.output.push(size_of::<f32>()?);
         for byte in v.to_be_bytes() {
-            self.output.push(byte)
+            self.output.push(byte);
         }
 
         Ok(())
@@ -166,7 +166,7 @@ impl ser::Serializer for &mut Serializer {
     fn serialize_f64(self, v: f64) -> std::result::Result<Self::Ok, Self::Error> {
         self.output.push(size_of::<f64>()?);
         for byte in v.to_be_bytes() {
-            self.output.push(byte)
+            self.output.push(byte);
         }
 
         Ok(())

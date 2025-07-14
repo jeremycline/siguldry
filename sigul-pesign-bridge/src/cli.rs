@@ -42,6 +42,9 @@ pub struct Cli {
     pub command: Command,
 }
 
+// Clippy: the CLI is public only because it's the neatest way to generate the
+// documentation, and there will be no API compatibility for this.
+#[allow(clippy::exhaustive_enums)]
 #[derive(clap::Subcommand, Debug)]
 pub enum Command {
     /// Run the service.

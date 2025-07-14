@@ -379,7 +379,7 @@ async fn sign_attached_with_filetype(
             tracing::error!(?error, path=?sigul_input, "Failed to open the temporary file used for sigul input");
         })?;
         let input_bytes = std::io::copy(&mut pesign_files.unsigned_input, &mut sigul_input_file).inspect_err(|error| {
-            tracing::error!(?error, path=?sigul_input, "Failed to copy the input file to a temporary file for sigul input")
+            tracing::error!(?error, path=?sigul_input, "Failed to copy the input file to a temporary file for sigul input");
         })?;
         tracing::info!(input_bytes, "Forwarding PE file to Sigul for signing");
 
@@ -476,7 +476,7 @@ async fn sign_attached_with_filetype(
             tracing::error!(?error, path=?sigul_output, "Failed to open the temporary file used for sigul output");
         })?;
         let output_bytes = std::io::copy(&mut sigul_output_file, &mut pesign_files.signed_output).inspect_err(|error| {
-            tracing::error!(?error, path=?sigul_input, "Failed to copy the sigul output file to the pesign input")
+            tracing::error!(?error, path=?sigul_input, "Failed to copy the sigul output file to the pesign input");
         })?;
         tracing::info!(output_bytes, "Signing request completed");
         Ok::<_, anyhow::Error>(())

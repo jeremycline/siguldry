@@ -568,7 +568,7 @@ impl Client {
         let mut num_users = response
             .fields
             .get("num-users")
-            .map(|b| Bytes::from(b.to_vec()))
+            .map(|b| Bytes::from(b.clone()))
             .ok_or(anyhow::anyhow!("missing expected field 'num-users'"))?;
 
         if num_users.len() != 4 {
@@ -888,7 +888,7 @@ impl Client {
         let mut num_keys = response
             .fields
             .get("num-keys")
-            .map(|b| Bytes::from(b.to_vec()))
+            .map(|b| Bytes::from(b.clone()))
             .ok_or(anyhow::anyhow!("missing expected field 'num-keys'"))?;
 
         if num_keys.len() != 4 {
@@ -954,8 +954,7 @@ impl Client {
                 email,
                 expire_date,
             } => (real_name, comment, email, expire_date),
-            KeyType::Ecc => (None, None, None, None),
-            KeyType::Rsa => (None, None, None, None),
+            KeyType::Ecc | KeyType::Rsa => (None, None, None, None),
         };
         let response = connection
             .outer_request::<tokio::io::Empty>(
@@ -1142,7 +1141,7 @@ impl Client {
         let mut num_users = response
             .fields
             .get("num-users")
-            .map(|b| Bytes::from(b.to_vec()))
+            .map(|b| Bytes::from(b.clone()))
             .ok_or(anyhow::anyhow!("missing expected field 'num-users'"))?;
 
         if num_users.len() != 4 {
@@ -1418,7 +1417,7 @@ impl Client {
         let connection = self.connect().await?;
 
         let op = Command::SignPe {
-            user: self.user_name.to_string(),
+            user: self.user_name.clone(),
             key: key_name,
             cert_name,
         };
@@ -1460,7 +1459,7 @@ impl Client {
         let response = connection
             .outer_request::<tokio::io::Empty>(
                 Command::SignCertificate {
-                    user: self.user_name.to_string(),
+                    user: self.user_name.clone(),
                     issuer_key: issuer_key_name,
                     subject_key: subject_key_name,
                     subject: format!("CN={subject_common_name}"),
@@ -1517,7 +1516,7 @@ impl Client {
         let mut num_methods = response
             .fields
             .get("num-methods")
-            .map(|b| Bytes::from(b.to_vec()))
+            .map(|b| Bytes::from(b.clone()))
             .ok_or(anyhow::anyhow!("missing expected field 'num-methods'"))?;
 
         if num_methods.len() != 4 {
