@@ -48,7 +48,7 @@ async fn main() -> Result<(), anyhow::Error> {
             credentials_directory,
         } => {
             let mut config = opts.config.unwrap_or_default();
-            println!("{}", config);
+            println!("{config}");
             let _ = config.fix_credentials(&credentials_directory);
             let _ = config.validate().inspect_err(|e| eprintln!("The configuration format is correct, but contain options which may be invalid: {e:?}")
             );

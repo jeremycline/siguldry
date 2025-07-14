@@ -111,7 +111,7 @@ async fn main() -> anyhow::Result<()> {
             .await
             .context("request timed out")??;
             for user in users {
-                println!("{}", user);
+                println!("{user}");
             }
         }
         Command::UserInfo {

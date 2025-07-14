@@ -84,7 +84,7 @@ async fn get_user_does_not_exist() -> anyhow::Result<()> {
         .await;
     match user {
         Err(ClientError::Sigul(Sigul::UserNotFound)) => {}
-        _ => panic!("Expected a Sigul error, got {:?}", user),
+        _ => panic!("Expected a Sigul error, got {user:?}"),
     }
 
     Ok(())
@@ -97,7 +97,7 @@ async fn get_user_invalid_password() -> anyhow::Result<()> {
         .get_user("not-my-admin-password".into(), "sigul-client".to_string())
         .await;
     if !matches!(user, Err(ClientError::Sigul(Sigul::AuthenticationFailed))) {
-        panic!("Expected a Sigul error, got {:?}", user)
+        panic!("Expected a Sigul error, got {user:?}")
     }
 
     Ok(())
@@ -111,7 +111,7 @@ async fn create_user_no_password() -> anyhow::Result<()> {
         .delete_user("my-admin-password".into(), "no-password-user".to_string())
         .await;
     if cleanup.is_err() && !matches!(cleanup, Err(ClientError::Sigul(Sigul::UserNotFound))) {
-        panic!("Expected a Sigul error, got {:?}", cleanup)
+        panic!("Expected a Sigul error, got {cleanup:?}")
     }
 
     client
@@ -139,7 +139,7 @@ async fn create_user_with_password() -> anyhow::Result<()> {
         .delete_user("my-admin-password".into(), "with-password-user".to_string())
         .await;
     if cleanup.is_err() && !matches!(cleanup, Err(ClientError::Sigul(Sigul::UserNotFound))) {
-        panic!("Expected a Sigul error, got {:?}", cleanup)
+        panic!("Expected a Sigul error, got {cleanup:?}")
     }
 
     client
@@ -168,7 +168,7 @@ async fn modify_user_toggle_admin() -> anyhow::Result<()> {
         .delete_user("my-admin-password".into(), test_user.to_string())
         .await;
     if cleanup.is_err() && !matches!(cleanup, Err(ClientError::Sigul(Sigul::UserNotFound))) {
-        panic!("Expected a Sigul error, got {:?}", cleanup)
+        panic!("Expected a Sigul error, got {cleanup:?}")
     }
     client
         .create_user(
@@ -226,7 +226,7 @@ async fn modify_user_change_name() -> anyhow::Result<()> {
         .delete_user("my-admin-password".into(), test_user.to_string())
         .await;
     if cleanup.is_err() && !matches!(cleanup, Err(ClientError::Sigul(Sigul::UserNotFound))) {
-        panic!("Expected a Sigul error, got {:?}", cleanup)
+        panic!("Expected a Sigul error, got {cleanup:?}")
     }
     client
         .create_user(
@@ -336,8 +336,7 @@ async fn key_user_info_self_owner() -> anyhow::Result<()> {
         .await;
     if cleanup.is_err() && !matches!(cleanup, Err(ClientError::Sigul(Sigul::KeyNotFound))) {
         panic!(
-            "unexpected Sigul error while cleaning up, got {:?}",
-            cleanup
+            "unexpected Sigul error while cleaning up, got {cleanup:?}"
         )
     }
 
@@ -384,8 +383,7 @@ async fn key_user_info_other_owner() -> anyhow::Result<()> {
         .await;
     if cleanup_key.is_err() && !matches!(cleanup_key, Err(ClientError::Sigul(Sigul::KeyNotFound))) {
         panic!(
-            "unexpected Sigul error while cleaning up, got {:?}",
-            cleanup_key
+            "unexpected Sigul error while cleaning up, got {cleanup_key:?}"
         )
     }
     let cleanup_user = client
@@ -394,7 +392,7 @@ async fn key_user_info_other_owner() -> anyhow::Result<()> {
     if cleanup_user.is_err()
         && !matches!(cleanup_user, Err(ClientError::Sigul(Sigul::UserNotFound)))
     {
-        panic!("Expected a Sigul error, got {:?}", cleanup_user)
+        panic!("Expected a Sigul error, got {cleanup_user:?}")
     }
 
     client
@@ -442,7 +440,7 @@ async fn key_user_info_other_owner() -> anyhow::Result<()> {
         .await;
 
     if !matches!(result, Err(ClientError::Sigul(Sigul::KeyUserNotFound))) {
-        panic!("Expected a Sigul error, got {:?}", result);
+        panic!("Expected a Sigul error, got {result:?}");
     }
 
     Ok(())
@@ -460,8 +458,7 @@ async fn modify_key_user_demote_promote() -> anyhow::Result<()> {
         .await;
     if cleanup_key.is_err() && !matches!(cleanup_key, Err(ClientError::Sigul(Sigul::KeyNotFound))) {
         panic!(
-            "unexpected Sigul error while cleaning up, got {:?}",
-            cleanup_key
+            "unexpected Sigul error while cleaning up, got {cleanup_key:?}"
         )
     }
     let cleanup_user = client
@@ -470,7 +467,7 @@ async fn modify_key_user_demote_promote() -> anyhow::Result<()> {
     if cleanup_user.is_err()
         && !matches!(cleanup_user, Err(ClientError::Sigul(Sigul::UserNotFound)))
     {
-        panic!("Expected a Sigul error, got {:?}", cleanup_user)
+        panic!("Expected a Sigul error, got {cleanup_user:?}")
     }
 
     client
@@ -563,7 +560,7 @@ async fn key_create_and_list() -> anyhow::Result<()> {
         .delete_key("my-admin-password".into(), key_name.clone())
         .await;
     if cleanup.is_err() && !matches!(cleanup, Err(ClientError::Sigul(Sigul::KeyNotFound))) {
-        panic!("Expected a Sigul error, got {:?}", cleanup)
+        panic!("Expected a Sigul error, got {cleanup:?}")
     }
 
     let key = client
@@ -684,7 +681,7 @@ pub async fn key_gpg_create_with_expiration() -> anyhow::Result<()> {
         .delete_key("my-admin-password".into(), key_name.clone())
         .await;
     if cleanup.is_err() && !matches!(cleanup, Err(ClientError::Sigul(Sigul::KeyNotFound))) {
-        panic!("Expected a Sigul error, got {:?}", cleanup)
+        panic!("Expected a Sigul error, got {cleanup:?}")
     }
 
     let key = client
@@ -765,7 +762,7 @@ async fn key_delete_nonexistent() -> anyhow::Result<()> {
         .delete_key("my-admin-password".into(), key_name)
         .await;
     if !matches!(result, Err(ClientError::Sigul(Sigul::KeyNotFound))) {
-        panic!("Expected a Sigul error, got {:?}", result);
+        panic!("Expected a Sigul error, got {result:?}");
     }
     Ok(())
 }
@@ -780,7 +777,7 @@ pub async fn key_rsa_import() -> anyhow::Result<()> {
         .delete_key("my-admin-password".into(), key_name.clone())
         .await;
     if cleanup.is_err() && !matches!(cleanup, Err(ClientError::Sigul(Sigul::KeyNotFound))) {
-        panic!("Expected a Sigul error, got {:?}", cleanup)
+        panic!("Expected a Sigul error, got {cleanup:?}")
     }
 
     let key = rsa::Rsa::generate(2048)?;
@@ -822,7 +819,7 @@ pub async fn key_ecc_import() -> anyhow::Result<()> {
         .delete_key("my-admin-password".into(), key_name.clone())
         .await;
     if cleanup.is_err() && !matches!(cleanup, Err(ClientError::Sigul(Sigul::KeyNotFound))) {
-        panic!("Expected a Sigul error, got {:?}", cleanup)
+        panic!("Expected a Sigul error, got {cleanup:?}")
     }
 
     let key = ec::EcKey::generate(
@@ -867,7 +864,7 @@ pub async fn key_ecc_import_as_rsa() -> anyhow::Result<()> {
         .delete_key("my-admin-password".into(), key_name.clone())
         .await;
     if cleanup.is_err() && !matches!(cleanup, Err(ClientError::Sigul(Sigul::KeyNotFound))) {
-        panic!("Expected a Sigul error, got {:?}", cleanup)
+        panic!("Expected a Sigul error, got {cleanup:?}")
     }
 
     let key = ec::EcKey::generate(
@@ -907,7 +904,7 @@ pub async fn key_users() -> anyhow::Result<()> {
         .delete_key("my-admin-password".into(), key_name.clone())
         .await;
     if cleanup.is_err() && !matches!(cleanup, Err(ClientError::Sigul(Sigul::KeyNotFound))) {
-        panic!("Expected a Sigul error, got {:?}", cleanup)
+        panic!("Expected a Sigul error, got {cleanup:?}")
     }
 
     let key = client
@@ -945,13 +942,13 @@ pub async fn key_additional_users() -> anyhow::Result<()> {
         .delete_key("my-admin-password".into(), key_name.clone())
         .await;
     if cleanup.is_err() && !matches!(cleanup, Err(ClientError::Sigul(Sigul::KeyNotFound))) {
-        panic!("Expected a Sigul error, got {:?}", cleanup)
+        panic!("Expected a Sigul error, got {cleanup:?}")
     }
     let cleanup = client
         .delete_user("my-admin-password".into(), user_name.clone())
         .await;
     if cleanup.is_err() && !matches!(cleanup, Err(ClientError::Sigul(Sigul::UserNotFound))) {
-        panic!("Expected a Sigul error, got {:?}", cleanup)
+        panic!("Expected a Sigul error, got {cleanup:?}")
     }
 
     let key = client
@@ -1010,13 +1007,13 @@ pub async fn key_revoke_user() -> anyhow::Result<()> {
         .delete_key("my-admin-password".into(), key_name.clone())
         .await;
     if cleanup.is_err() && !matches!(cleanup, Err(ClientError::Sigul(Sigul::KeyNotFound))) {
-        panic!("Expected a Sigul error, got {:?}", cleanup)
+        panic!("Expected a Sigul error, got {cleanup:?}")
     }
     let cleanup = client
         .delete_user("my-admin-password".into(), user_name.clone())
         .await;
     if cleanup.is_err() && !matches!(cleanup, Err(ClientError::Sigul(Sigul::UserNotFound))) {
-        panic!("Expected a Sigul error, got {:?}", cleanup)
+        panic!("Expected a Sigul error, got {cleanup:?}")
     }
 
     let key = client
@@ -1095,7 +1092,7 @@ pub async fn key_gpg_expiration() -> anyhow::Result<()> {
         .delete_key("my-admin-password".into(), key_name.clone())
         .await;
     if cleanup.is_err() && !matches!(cleanup, Err(ClientError::Sigul(Sigul::KeyNotFound))) {
-        panic!("Expected a Sigul error, got {:?}", cleanup)
+        panic!("Expected a Sigul error, got {cleanup:?}")
     }
 
     let key = client
@@ -1157,13 +1154,13 @@ pub async fn change_key_passphrase() -> anyhow::Result<()> {
         .delete_key("my-admin-password".into(), key_name.clone())
         .await;
     if cleanup.is_err() && !matches!(cleanup, Err(ClientError::Sigul(Sigul::KeyNotFound))) {
-        panic!("Expected a Sigul error, got {:?}", cleanup)
+        panic!("Expected a Sigul error, got {cleanup:?}")
     }
     let cleanup = client
         .delete_user("my-admin-password".into(), user_name.clone())
         .await;
     if cleanup.is_err() && !matches!(cleanup, Err(ClientError::Sigul(Sigul::UserNotFound))) {
-        panic!("Expected a Sigul error, got {:?}", cleanup)
+        panic!("Expected a Sigul error, got {cleanup:?}")
     }
 
     client
@@ -1253,8 +1250,7 @@ pub async fn code_signing_certificate() -> anyhow::Result<()> {
         .await;
     if cleanup.is_err() && !matches!(cleanup, Err(ClientError::Sigul(Sigul::KeyNotFound))) {
         panic!(
-            "unexpected Sigul error while cleaning up, got {:?}",
-            cleanup
+            "unexpected Sigul error while cleaning up, got {cleanup:?}"
         )
     }
     let cleanup = client
@@ -1262,8 +1258,7 @@ pub async fn code_signing_certificate() -> anyhow::Result<()> {
         .await;
     if cleanup.is_err() && !matches!(cleanup, Err(ClientError::Sigul(Sigul::KeyNotFound))) {
         panic!(
-            "unexpected Sigul error while cleaning up, got {:?}",
-            cleanup
+            "unexpected Sigul error while cleaning up, got {cleanup:?}"
         )
     }
 

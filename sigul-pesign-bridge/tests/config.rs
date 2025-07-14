@@ -18,7 +18,7 @@ fn config_with_default_works() -> Result<()> {
         .stdout(Stdio::piped())
         .output()?;
     let logs = String::from_utf8_lossy(&output.stdout);
-    println!("cli_stdout: {}", logs);
+    println!("cli_stdout: {logs}");
     println!("cli_stderr: {}", String::from_utf8_lossy(&output.stderr));
     assert!(output.status.success());
     assert!(logs.contains("[sigul]"));

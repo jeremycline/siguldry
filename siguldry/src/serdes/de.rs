@@ -32,7 +32,7 @@ pub fn from_bytes(input: &[u8]) -> Result<HashMap<String, Vec<u8>>> {
             key.push(*input.next().ok_or(Error::MissingBytes)?)
         }
         let key = String::from_utf8(key)
-            .map_err(|err| Error::Message(format!("Invalid UTF-8 used in key: {:?}", err)))?;
+            .map_err(|err| Error::Message(format!("Invalid UTF-8 used in key: {err:?}")))?;
 
         let mut value = vec![];
         let value_length = *input.next().ok_or(Error::MissingBytes)?;
