@@ -15,7 +15,7 @@ use zerocopy::{IntoBytes, TryFromBytes};
 
 use crate::v2::{
     error::ClientError as Error,
-    nestls::{Nestls, NestlsBuilder},
+    nestls::Nestls,
     protocol::{self, Request, Response, Role},
     tls,
 };
@@ -73,7 +73,7 @@ impl<S: ToSocketAddrs + std::fmt::Debug> Server<S> {
     }
 
     async fn accept(&self) -> Result<Nestls, Error> {
-        let conn = NestlsBuilder::new(self.tls_config.ssl(&self.bridge_hostname)?, Role::Server)
+        let conn = Nestls::builder(self.tls_config.ssl(&self.bridge_hostname)?, Role::Server)
             .accept(&self.bridge_address, self.server_tls_config.clone())
             .await?;
 

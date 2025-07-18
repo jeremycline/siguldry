@@ -148,7 +148,7 @@ impl<R> Service<R> for MakeClientService {
             }
             tracing::debug!("Creating new service connection");
             let conn_info = conn_info.lock().await;
-            let conn = NestlsBuilder::new(
+            let conn = Nestls::builder(
                 conn_info
                     .tls_config
                     .ssl(&conn_info.bridge_hostname)
