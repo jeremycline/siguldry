@@ -10,9 +10,9 @@ use tracing::instrument;
 static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/");
 
 /// Ensure the database is migrated to the latest version.
-/// 
+///
 /// # Example
-/// 
+///
 /// ```rust,no_run
 /// let pool = migrate("sqlite::memory:").await?;
 /// ```

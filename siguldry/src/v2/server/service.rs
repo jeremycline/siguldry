@@ -16,7 +16,7 @@ use zerocopy::{IntoBytes, TryFromBytes};
 use crate::v2::{
     error::ClientError as Error,
     nestls::{Nestls, NestlsBuilder},
-    protocol::{self, ContentType, Request, Response, Role},
+    protocol::{self, Request, Response, Role},
     tls,
 };
 
@@ -98,33 +98,34 @@ async fn handle(mut conn: Nestls) -> Result<(), anyhow::Error> {
             .map_err(|e| anyhow::anyhow!("Invalid frame: {:?}", e))?;
         tracing::debug!(?frame, "New request frame received");
 
-        let frame_size: usize = frame
-            .size
+        let json_size: usize = frame
+            .json_size
             .get()
             .try_into()
             .context("frame size must fit in usize")?;
+        let binary_size: usize = frame
+            .binary_size
+            .get()
+            .try_into()
+            .context("frame size must fit in usize")?;
+        let frame_size = json_size + binary_size;
         let mut request_buffer = BytesMut::with_capacity(frame_size).limit(frame_size);
         while request_buffer.remaining_mut() != 0 {
             conn.read_buf(&mut request_buffer).await?;
         }
-        let request_bytes = request_buffer.into_inner().freeze();
-        match frame.content_type {
-            ContentType::Json => {
-                let request: Request = serde_json::from_slice(&request_bytes)?;
-                match request {
-                    Request::WhoAmI {} => {
-                        let response =
-                            serde_json::to_string(&Response::WhoAmI { user: user.clone() })?;
-                        let response_frame = protocol::Frame::new(
-                            response.as_bytes().len().try_into()?,
-                            protocol::ContentType::Json,
-                        );
-                        conn.write_all(response_frame.as_bytes()).await?;
-                        conn.write_all(response.as_bytes()).await?;
-                    }
-                    Request::NewUser { username } => todo!(),
-                }
+        let mut request_bytes = request_buffer.into_inner().freeze();
+
+        let binary_bytes = request_bytes.split_off(json_size);
+        let json_request: Request = serde_json::from_slice(&request_bytes)
+            .context("The request's JSON could not be deserialized")?;
+        match json_request {
+            Request::WhoAmI {} => {
+                let response = serde_json::to_string(&Response::WhoAmI { user: user.clone() })?;
+                let response_frame = protocol::Frame::new(response.as_bytes().len().try_into()?, 0);
+                conn.write_all(response_frame.as_bytes()).await?;
+                conn.write_all(response.as_bytes()).await?;
             }
+            Request::NewUser { username } => todo!(),
         }
     }
 

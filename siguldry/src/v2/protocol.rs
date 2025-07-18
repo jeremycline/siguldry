@@ -5,6 +5,13 @@
 //!
 //! All structures described in this documenation are to be sent in network byte order (big endian).
 //!
+//! # Outer TLS Session
+//!
+//! Both the client and server connect to the bridge service using TLS, authenticated via client
+//! certificates. Once the connection is established, the connecting side (the client or server)
+//! sends a protocol header and waits for an acknowledgement from the bridge. After the
+//! acknowledgement is received, no further communication occurs in the outer TLS session.
+//!
 //! ## Protocol Header and Ack
 //!
 //! Every connection to the bridge must begin with the protocol header, which announces the protocol
@@ -38,27 +45,28 @@
 //! The protocol version is increased whenever any of the following structures are changed. Thus,
 //! all structures described below are specific to version 2 of the protocol.
 //!
-//! ## Inner TLS Session
+//! # Inner TLS Session
 //!
-//! After the protocol header, the client starts a second TLS session within the first one. In
-//! this session, the client must configure the TLS session to accept the Sigul server's hostname
-//! and must present its client TLS certificate. All future communication occurs over this nested
-//! TLS session.
+//! After the protocol header is acknowledged, the client starts a second TLS session within the
+//! first one. In this session, the client must configure the TLS session to accept the Sigul
+//! server's hostname and must present its client TLS certificate. All future communication occurs
+//! over this nested TLS session.
 //!
 //! ## Frames
 //!
-//! Each message in the inner TLS session must start with a frame, which describes the
-//! content type and size.
+//! Each message in the inner TLS session must start with a frame, which describes the size of the
+//! data to follow. Requests include two sections; the first is a JSON-serialized, UTF-8 encoded
+//! dictionary describing the request and its parameters. The second section is an arbitrary,
+//! request-specific binary blob. This binary blob is used exclusively for various signing requests
+//! and management commands do not include one. When the command does not have a binary blob, the
+//! size in the frame must be set to 0.
 //!
-//! |--------------------------|
-//! |      Frame Header        |
-//! |--------------------------|
-//! | u64 | Frame size (bytes) |
-//! | u8  | Content-Type       |
-//! |--------------------------|
-//!
-//! The content type is represented as a u8; refer to [`ContentType`] for examples.  The frame size
-//! is an unsigned 64 bit integer.
+//! |---------------------------|
+//! |        Frame Header       |
+//! |---------------------------|
+//! | u64 | JSON size (bytes)   |
+//! | u64 | Binary size (bytes) |
+//! |---------------------------|
 
 use openssl::nid::Nid;
 use serde::{Deserialize, Serialize};
@@ -266,26 +274,28 @@ pub enum Error {
     UnsupportedVersion,
 }
 
-/// Each client request or server response starts with a frame that declares the payload's content
-/// type and size (in bytes).
+/// Each client request or server response starts with a frame that describes the size of the request
+/// to follow.
 ///
 /// TODO: if something like JSON doesn't work for all commands, we could do something where a
 /// request/response is a list of frames so they can have mixed content types. But I think JSON will
 /// be fine for everything, so let's keep it simple for now.
 #[derive(IntoBytes, Immutable, KnownLayout, TryFromBytes, Debug, Clone)]
 pub(crate) struct Frame {
-    pub(crate) size: U64,
-    pub(crate) content_type: ContentType,
+    /// The
+    pub(crate) json_size: U64,
+    pub(crate) binary_size: U64,
 }
 
 // TODO maybe don't be fancy. Request responses always need to be JSON, and optionally can have an arbitrary command-specific bag of bytes following it
+// Drop the content type, size becomes request_size, add payload_size.
 
 impl Frame {
     /// Create a new frame.
-    pub fn new(size: u64, content_type: ContentType) -> Self {
+    pub fn new(json_size: u64, binary_size: u64) -> Self {
         Self {
-            size: U64::new(size),
-            content_type,
+            json_size: U64::new(json_size),
+            binary_size: U64::new(binary_size),
         }
     }
 }

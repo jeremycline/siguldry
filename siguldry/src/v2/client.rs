@@ -60,6 +60,12 @@ pub struct Client {
     inner: Reconnect<MakeClientService, ()>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct Req {
+    message: Request,
+    binary: Option<Bytes>,
+}
+
 impl Client {
     /// Create a new client
     pub fn new(config: ConnectionConfig) -> Self {
@@ -67,7 +73,7 @@ impl Client {
         Self { inner }
     }
 
-    async fn send(&mut self, request: Request) -> Result<Response, ClientError> {
+    async fn send(&mut self, request: Req) -> Result<Response, ClientError> {
         self.inner
             .ready()
             .await
@@ -77,7 +83,7 @@ impl Client {
             .map_err(|err| *err.downcast::<ClientError>().expect("huh"))
     }
 
-    async fn reconnecting_send(&mut self, request: Request) -> Result<Response, ClientError> {
+    async fn reconnecting_send(&mut self, request: Req) -> Result<Response, ClientError> {
         loop {
             match self.send(request.clone()).await {
                 Ok(response) => break Ok(response),
@@ -95,6 +101,10 @@ impl Client {
     /// Returns the username you successfully authenticated as.
     pub async fn who_am_i(&mut self) -> Result<String, ClientError> {
         let request = protocol::Request::WhoAmI {};
+        let request = Req {
+            message: request,
+            binary: None,
+        };
         let response = self.reconnecting_send(request).await?;
         match response {
             Response::WhoAmI { user } => Ok(user),
@@ -202,26 +212,25 @@ impl ClientService {
             let frame = protocol::Frame::try_ref_from_bytes(&frame_buffer).unwrap();
             tracing::info!(?frame, "New frame received");
 
-            let frame_size: usize = frame.size.get().try_into().unwrap();
+            let json_size: usize = frame.json_size.get().try_into().unwrap();
+            let binary_size: usize = frame.binary_size.get().try_into().unwrap();
+            let frame_size = json_size + binary_size;
             let mut response_buffer = BytesMut::with_capacity(frame_size).limit(frame_size);
             while response_buffer.remaining_mut() != 0 {
                 connection.read_buf(&mut response_buffer).await?;
             }
 
-            let response_bytes = response_buffer.into_inner().freeze();
-            match frame.content_type {
-                protocol::ContentType::Json => {
-                    let response: Response = serde_json::from_slice(&response_bytes).unwrap();
-                    respond_to.send(response).unwrap();
-                }
-            }
+            let mut response_bytes = response_buffer.into_inner().freeze();
+            let binary_bytes = response_bytes.split_off(json_size);
+            let json_response: Response = serde_json::from_slice(&response_bytes).unwrap();
+            respond_to.send(json_response).unwrap();
         }
 
         Ok(())
     }
 }
 
-impl Service<Request> for ClientService {
+impl Service<Req> for ClientService {
     type Response = Response;
     type Error = ClientError;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
@@ -236,13 +245,18 @@ impl Service<Request> for ClientService {
     }
 
     #[instrument(skip_all, fields(session_id = self.session_id))]
-    fn call(&mut self, request: Request) -> Self::Future {
-        let request = serde_json::to_string(&request).unwrap();
-        let request = Bytes::from_owner(request);
+    fn call(&mut self, request: Req) -> Self::Future {
+        let json = serde_json::to_string(&request.message).unwrap();
+        let json = Bytes::from_owner(json);
+        let binary = request.binary.unwrap_or_else(|| bytes::Bytes::new());
         let request_frame = protocol::Frame::new(
-            request.as_bytes().len().try_into().unwrap(),
-            protocol::ContentType::Json,
+            json.as_bytes().len().try_into().unwrap(),
+            binary.as_bytes().len().try_into().unwrap(),
         );
+        let mut request = BytesMut::from(json);
+        request.put(binary);
+        let request = request.freeze();
+
         let (response_tx, response_rx) = oneshot::channel();
         let request_tx = self.request_tx.clone();
 
@@ -283,12 +297,12 @@ impl RetryPolicy {
     }
 }
 
-impl tower::retry::Policy<Request, Response, tower::BoxError> for RetryPolicy {
+impl tower::retry::Policy<Req, Response, tower::BoxError> for RetryPolicy {
     type Future = <ExponentialBackoff as Backoff>::Future;
 
     fn retry(
         &mut self,
-        _req: &mut Request,
+        _req: &mut Req,
         result: &mut Result<Response, tower::BoxError>,
     ) -> Option<Self::Future> {
         match result {
@@ -313,7 +327,7 @@ impl tower::retry::Policy<Request, Response, tower::BoxError> for RetryPolicy {
         }
     }
 
-    fn clone_request(&mut self, req: &Request) -> Option<Request> {
+    fn clone_request(&mut self, req: &Req) -> Option<Req> {
         Some(req.clone())
     }
 }

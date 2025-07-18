@@ -20,7 +20,7 @@ Since the protocol has been changed, the command APIs have also been adjusted co
 pub mod bridge;
 pub mod client;
 pub mod error;
-pub mod nestls;
-pub mod protocol;
+pub(crate) mod nestls;
+pub(crate) mod protocol;
 pub mod server;
 pub mod tls;
