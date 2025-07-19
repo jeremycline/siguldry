@@ -145,6 +145,27 @@ pub(crate) enum BridgeStatus {
     MissingMagic = 4,
 }
 
+impl std::fmt::Display for BridgeStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BridgeStatus::Ok => write!(f, "OK"),
+            BridgeStatus::UnsupportedVersion => {
+                write!(f, "The requested protocol version is not supported")
+            }
+            BridgeStatus::InvalidRole => write!(
+                f,
+                "The requested role is invalid for the bridge address and port"
+            ),
+            BridgeStatus::MissingCommonName => {
+                write!(f, "The client certificate does not contain a CommonName")
+            }
+            BridgeStatus::MissingMagic => {
+                write!(f, "The connection didn't start with the magic number")
+            }
+        }
+    }
+}
+
 /// The bridge sends this acknowledgement to connections after receiving the protocol header.
 /// The client and server can use this to determine if the inner connection can proceed, and
 /// it also includes a session ID so logs across the services can be corrolated.
@@ -172,7 +193,7 @@ impl ProtocolAck {
 
         match ack.status {
             BridgeStatus::Ok => Ok(session_id),
-            other => todo!(),
+            other => Err(Error::Bridge(other.to_string()).into()),
         }
     }
 }
@@ -231,6 +252,8 @@ pub enum Error {
     MissingCommonName,
     #[error("The frame was invalid: {0}")]
     Framing(String),
+    #[error("The bridge rejected the protocol header: {0}")]
+    Bridge(String),
 }
 
 /// Each client request or server response starts with a frame that describes the size of the request

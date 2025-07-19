@@ -42,7 +42,8 @@ pub enum ConnectionError {
 
     /// A Sigul protocol violation occurred.
     ///
-    /// This occurs if the handshake is malformed, the framing is
+    /// This occurs if the handshake is malformed, the framing is invalid, etc.
+    /// This is almost certainly a bug.
     #[error(transparent)]
     Protocol(#[from] ProtocolError),
 }
@@ -60,10 +61,6 @@ where
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ClientError {
-    /// Returned in the event that the Sigul server responds with a non-zero status code.
-    #[error("the sigul server replied with an error: {0}")]
-    Sigul(#[from] Sigul),
-
     /// Returned in the event that a request could not be serialized, or
     /// if a Sigul response could not be deserialized.
     ///
@@ -71,22 +68,11 @@ pub enum ClientError {
     #[error("failed to serialize to or deserialize from sigul: {0}")]
     Serde(#[from] crate::serdes::Error),
 
-    /// The HMAC on the Sigul server's header or payload was incorrect,
-    /// and its responses may have been tampered with (or corrupted) by
-    /// the Sigul bridge.
-    ///
-    /// It's possible retrying the request will result in success in the
-    /// unlikely event that a bit flipped somewhere along the way, but is
-    /// also likely to fail with this error again if something more
-    /// nefarious is occurring.
-    #[error("the Sigul server signature on its response was invalid")]
-    InvalidSignature,
-
     /// Returned in the event that an error occurred while communicating with the Sigul bridge or
     /// Sigul server. This may be a result of a transient networking problem, or because of a more
-    /// permanent issue such and invalid configuration, or event a client bug.
+    /// permanent issue such as invalid configuration, or event a client bug.
     ///
-    /// Retrying the operation that led to this error should be safe, although whether subsequent
+    /// Retrying the operation that led to this error is safe, although whether subsequent
     /// attempts fail or succeed depend on the specific error.  Refer to [`ConnectionError`] for
     /// details on the possible errors and if retrying is advisable.
     #[error("connection error with Sigul bridge or server: {0}")]
@@ -96,7 +82,7 @@ pub enum ClientError {
     /// due to a file not existing, or being unreadable by this process.
     ///
     /// For example, TLS certificates and private keys are read from the filesystem.  Some client
-    /// operations involve sending or receiving files, as well.
+    /// operations may involve sending or receiving files, as well.
     #[error("an I/O error occurred: {0}")]
     Io(#[from] std::io::Error),
 
@@ -106,7 +92,7 @@ pub enum ClientError {
     /// This error is not returned for an OpenSSL-related error during the connection, so retrying
     /// is not appropriate.
     #[error("openssl could not be configured: {0}")]
-    Openssl(#[from] openssl::error::ErrorStack),
+    Ssl(#[from] openssl::error::ErrorStack),
 
     /// Generic error that indicates a fatal error, likely due to a bug in the client.
     ///
