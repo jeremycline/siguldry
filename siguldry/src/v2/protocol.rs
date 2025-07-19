@@ -68,6 +68,8 @@
 //! | u64 | Binary size (bytes) |
 //! |---------------------------|
 
+use std::fmt::Display;
+
 use openssl::nid::Nid;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -85,12 +87,6 @@ use crate::v2::error::ConnectionError;
 pub const MAGIC: U64 = U64::from_bytes([83, 73, 71, 85, 76, 68, 82, 89]);
 /// The Sigul wire protocol version this implementation supports
 pub const PROTOCOL_VERSION: U32 = U32::new(2);
-
-#[derive(IntoBytes, Immutable, KnownLayout, TryFromBytes, Debug, Clone, Copy)]
-#[repr(u8)]
-pub(crate) enum ContentType {
-    Json = 0,
-}
 
 /// The possible roles a connection can have.
 ///
@@ -124,14 +120,14 @@ pub(crate) struct ProtocolHeader {
     /// restricted set of valid values, this makes it even more likely a random incoming connection
     /// doesn't send a valid header so the bridge can hang up sooner. This isn't a security thing, just
     /// a "make it very likely you can log the right error" thing.
-    magic: U64,
+    pub(crate) magic: U64,
     /// The protocol version being requested by the connection; the current version is
     /// [`PROTOCOL_VERSION`].
-    version: U32,
+    pub(crate) version: U32,
     /// The [`Role`] of this connection; the bridge should listen on entirely different ports and so it
     /// should know whether each connection is a client or a server. This exists primarily to help catch
     /// mis-configurations where the client or server connects to the other's port on the bridge.
-    role: Role,
+    pub(crate) role: Role,
 }
 
 /// Part of the protocol Ack sent by the bridge to indicate whether the connection can continue.
@@ -149,17 +145,6 @@ pub(crate) enum BridgeStatus {
     MissingCommonName = 3,
     /// The request did not begin with the correct magic number.
     MissingMagic = 4,
-}
-
-impl From<&Error> for BridgeStatus {
-    fn from(value: &Error) -> Self {
-        match value {
-            Error::MissingCommonName => BridgeStatus::MissingCommonName,
-            Error::InvalidRole => BridgeStatus::InvalidRole,
-            Error::UnsupportedVersion => BridgeStatus::UnsupportedVersion,
-            Error::MissingMagic => BridgeStatus::MissingMagic,
-        }
-    }
 }
 
 /// The bridge sends this acknowledgement to connections after receiving the protocol header.
@@ -189,12 +174,7 @@ impl ProtocolAck {
 
         match ack.status {
             BridgeStatus::Ok => Ok(session_id),
-            BridgeStatus::UnsupportedVersion => {
-                Err(ConnectionError::Protocol(Error::UnsupportedVersion))
-            }
-            BridgeStatus::InvalidRole => Err(ConnectionError::Protocol(Error::InvalidRole)),
-            BridgeStatus::MissingCommonName => todo!(),
-            BridgeStatus::MissingMagic => todo!(),
+            other => todo!(),
         }
     }
 }
@@ -209,24 +189,15 @@ impl ProtocolHeader {
         }
     }
 
-    #[instrument(level = "trace", skip_all, err)]
-    pub(crate) async fn check<C: AsyncRead + Unpin>(
-        conn: &mut C,
-        expected_role: Role,
-    ) -> Result<(), ConnectionError> {
-        let mut header_buf = [0_u8; std::mem::size_of::<Self>()];
-        conn.read_exact(&mut header_buf).await?;
-        let header = Self::try_ref_from_bytes(&header_buf)?;
-
-        if header.magic != MAGIC {
-            Err(ConnectionError::Protocol(Error::MissingMagic))
-        } else if header.version != PROTOCOL_VERSION {
-            Err(ConnectionError::Protocol(Error::UnsupportedVersion))
-        } else if header.role != expected_role {
-            Err(ConnectionError::Protocol(Error::InvalidRole))
+    pub(crate) fn check(&self, expected_role: Role) -> BridgeStatus {
+        if self.magic != MAGIC {
+            BridgeStatus::MissingMagic
+        } else if self.version != PROTOCOL_VERSION {
+            BridgeStatus::UnsupportedVersion
+        } else if self.role != expected_role {
+            BridgeStatus::InvalidRole
         } else {
-            tracing::debug!(header=?header, "Protocol header passed validation");
-            Ok(())
+            BridgeStatus::Ok
         }
     }
 }
@@ -260,18 +231,8 @@ pub enum Error {
     /// username of the client.
     #[error("The peer's certificate does not include a Common Name")]
     MissingCommonName,
-    /// The connection did not include the correct magic number in the header; this is likely
-    /// due to something other than a Sigul client connecting.
-    #[error("The connection did not begin with the correct magic number")]
-    MissingMagic,
-    /// The role used by the connection does not match with the expected role of the socket.
-    /// This is likely a mis-configuration in the connecting service, but you should consider
-    /// setting up a firewall rule to ensure the connecting client can't reach this port.
-    #[error("The requested role is invalid for the service port")]
-    InvalidRole,
-    /// The connection requested a version of the protocol that is not supported by all parties.
-    #[error("The requested protocol version is not supported.")]
-    UnsupportedVersion,
+    #[error("The frame was invalid: {0}")]
+    Framing(String),
 }
 
 /// Each client request or server response starts with a frame that describes the size of the request

@@ -24,7 +24,7 @@ use zerocopy::{IntoBytes, TryFromBytes};
 
 use crate::v2::{
     error::ClientError,
-    nestls::{Nestls, NestlsBuilder},
+    nestls::Nestls,
     protocol::{self, Frame, Request, Response, Role},
     tls,
 };

@@ -7,14 +7,6 @@ use zerocopy::TryCastError;
 
 use crate::v2::protocol::Error as ProtocolError;
 
-/// Errors the server returns in the event that a request cannot be completed.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum RequestError {
-    #[error("A connection error occurred")]
-    Connection(#[from] ConnectionError),
-}
-
 /// Errors that occur during the connection.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -50,13 +42,9 @@ pub enum ConnectionError {
 
     /// A Sigul protocol violation occurred.
     ///
-    /// This occurs if the handshake is malformed, the framing is invalid, etc.
+    /// This occurs if the handshake is malformed, the framing is
     #[error(transparent)]
     Protocol(#[from] ProtocolError),
-
-    /// A framing error occurred.
-    #[error("A framing error occurred: {0}")]
-    Frame(String),
 }
 
 impl<S, D> From<TryCastError<S, D>> for ConnectionError
@@ -64,7 +52,7 @@ where
     D: zerocopy::TryFromBytes,
 {
     fn from(value: TryCastError<S, D>) -> Self {
-        Self::Frame(format!("{:?}", value))
+        ProtocolError::Framing(format!("{:?}", value)).into()
     }
 }
 

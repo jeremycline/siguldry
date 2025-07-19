@@ -1,8 +1,9 @@
 use std::{fmt::Debug, pin::Pin};
 
+use anyhow::anyhow;
 use openssl::ssl::Ssl;
 use tokio::{
-    io::AsyncWriteExt,
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, ToSocketAddrs},
     sync::mpsc,
 };
@@ -10,11 +11,10 @@ use tokio_openssl::SslStream;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{instrument, Instrument};
 use uuid::Uuid;
-use zerocopy::IntoBytes;
+use zerocopy::{IntoBytes, TryFromBytes};
 
 use crate::v2::{
-    error::ConnectionError,
-    protocol::{self, peer_common_name, Role},
+    protocol::{self, peer_common_name, BridgeStatus, ProtocolAck, Role},
     tls::ServerConfig,
 };
 
@@ -22,24 +22,31 @@ async fn accept_conn(
     tcp_listener: &TcpListener,
     ssl: Ssl,
     role: Role,
-) -> Result<SslStream<TcpStream>, ConnectionError> {
+) -> anyhow::Result<SslStream<TcpStream>> {
     let (tcp_stream, client_addr) = tcp_listener.accept().await?;
     tracing::info!(listener=?tcp_listener.local_addr()?, ?client_addr, "New TCP connection established");
 
     let mut stream = tokio_openssl::SslStream::new(ssl, tcp_stream)?;
-    let result = Pin::new(&mut stream).accept().await;
-    tracing::info!(listener=?tcp_listener.local_addr()?, ?client_addr, ?result, "TLS session established");
+    Pin::new(&mut stream).accept().await?;
+    tracing::info!(listener=?tcp_listener.local_addr()?, ?client_addr, "TLS session established");
 
-    let header_result = protocol::ProtocolHeader::check(&mut stream, role).await;
-    if let Err(ConnectionError::Protocol(error)) = &header_result {
-        tracing::warn!(
-            ?error,
-            "Incoming connection sent an invalid header; dropping connection"
-        );
-        let ack = protocol::ProtocolAck::new(error.into());
-        stream.write_all(ack.as_bytes()).await?;
+    let mut header_buf = [0_u8; std::mem::size_of::<protocol::ProtocolHeader>()];
+    stream.read_exact(&mut header_buf).await?;
+    let header = protocol::ProtocolHeader::try_ref_from_bytes(&header_buf)
+        .map_err(|err| anyhow!("Failed to parse protocol header: {}", err))?;
+
+    match header.check(role) {
+        BridgeStatus::Ok => {
+            tracing::trace!(header=?header, "Protocol header passed validation");
+        }
+        error => {
+            let ack = ProtocolAck::new(error);
+            stream.write_all(ack.as_bytes()).await?;
+            return Err(anyhow::anyhow!(
+                "Incoming connection sent an invalid header; dropping connection"
+            ));
+        }
     }
-    header_result?;
 
     let peer_name = peer_common_name(&mut stream);
     match &peer_name {
@@ -47,10 +54,13 @@ async fn accept_conn(
             // We defer acking good connections until we have both sides so that they can share a session id
             tracing::info!(username, ?role, "Sigul connection established");
         }
-        Err(error) => {
-            tracing::warn!(?error, "Incoming connection presented a client certificate without a common name; dropping connection");
-            let ack = protocol::ProtocolAck::new(error.into());
+        Err(protocol::Error::MissingCommonName) => {
+            tracing::warn!("Incoming connection presented a client certificate without a common name; dropping connection");
+            let ack = protocol::ProtocolAck::new(protocol::BridgeStatus::MissingCommonName);
             stream.write_all(ack.as_bytes()).await?;
+        }
+        Err(error) => {
+            tracing::warn!(?error, "Failed to parse the client certificate");
         }
     };
     peer_name?;
