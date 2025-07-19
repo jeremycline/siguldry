@@ -5,7 +5,7 @@
 
 use zerocopy::TryCastError;
 
-use crate::v2::protocol::Error as ProtocolError;
+use crate::v2::protocol::{Error as ProtocolError, ServerError};
 
 /// Errors that occur during the connection.
 #[derive(Debug, thiserror::Error)]
@@ -93,6 +93,12 @@ pub enum ClientError {
     /// is not appropriate.
     #[error("openssl could not be configured: {0}")]
     Ssl(#[from] openssl::error::ErrorStack),
+
+    /// Errors the server returned for a particular request.
+    ///
+    /// Retrying may be appropriate for some server errors, while others may never succeed.
+    #[error("The server responded with an error: {0}")]
+    Server(#[from] ServerError),
 
     /// Generic error that indicates a fatal error, likely due to a bug in the client.
     ///

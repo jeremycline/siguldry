@@ -5,7 +5,7 @@
 
 use bytes::Bytes;
 
-use crate::v2::{protocol::Request, tls};
+use crate::v2::{protocol::json::Request, tls};
 
 mod api;
 mod service;

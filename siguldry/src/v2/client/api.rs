@@ -10,7 +10,7 @@ use tower::{reconnect::Reconnect, Service, ServiceExt};
 use crate::v2::{
     client::{service::MakeClientService, ConnectionConfig, Req},
     error::ClientError,
-    protocol::{self, Response},
+    protocol::{self, json::Response},
 };
 
 /// A siguldry client.
@@ -52,7 +52,7 @@ impl Client {
     ///
     /// Returns the username you successfully authenticated as.
     pub async fn who_am_i(&mut self) -> Result<String, ClientError> {
-        let request = protocol::Request::WhoAmI {};
+        let request = protocol::json::Request::WhoAmI {};
         let request = Req {
             message: request,
             binary: None,

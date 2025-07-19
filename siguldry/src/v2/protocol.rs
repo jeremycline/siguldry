@@ -282,117 +282,100 @@ impl Frame {
     }
 }
 
-/// Messages between the client and server are serialized via this enum.
-///
-/// Clients send requests, servers send responses. Currently, the only supported
-/// content type is JSON.
-///
-/// The following example is the JSON-serialized "hello" request. The top-level object
-/// has three keys, all of which are required. The `payload` key will always contain a
-/// single key that is either `"request"` or `"response"` and has a dictionary value.
-/// The contents of that dictionary are defined in the [`Request`] and [`Response`]
-/// enumerations.
-///
-/// # Example
-/// ```
-/// # use serde_json::Result;
-/// # use siguldry::v2::protocol::Message;
-/// # fn main() -> Result<()> {
-/// let data = r#"
-///     {
-///         "session_id": "00000000-0000-0000-0000-000000000000",
-///         "request_id": 42,
-///         "payload": {
-///             "request": {
-///                 "hello": {}
-///             }
-///         }
-///     }
-/// "#;
-/// let hello_request: Message = serde_json::from_str(data)?;
-///
-/// # Ok(())
-/// }
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) struct Message {
-    /// The session ID this request is a part of.
-    session_id: Uuid,
-    /// The request ID; this should be a unique integer within the session,
-    /// but has no other requirements. The response will include the same ID
-    /// so it can be used to ensure the response matches the request.
-    request_id: u64,
-    /// The serialized [`Request`] or [`Response`].
-    payload: Payload,
-}
-
-/// The payload of a message between the server and client.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum Payload {
-    Request(Request),
-    Response(Response),
-}
-
-/// The set of requests a client and server must support.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum Request {
-    WhoAmI {},
-    NewUser { username: String },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum Response {
-    WhoAmI { user: String },
-}
-
-#[cfg(test)]
-mod tests {
+pub(crate) mod json {
+    use serde::{Deserialize, Serialize};
     use uuid::Uuid;
 
-    use super::*;
+    use crate::v2::protocol::ServerError;
 
-    #[test]
-    fn json_command_serialization() -> anyhow::Result<()> {
-        let expected = "\
-        {\"session_id\":\"00000000-0000-0000-0000-000000000000\",\
-        \"request_id\":42,\
-        \"payload\":{\
-        \"request\":{\"new_user\":{\"username\":\"jcline\"}}}}";
-        let value = Message {
-            session_id: Uuid::nil(),
-            request_id: 42,
-            payload: Payload::Request(Request::NewUser {
-                username: "jcline".to_string(),
-            }),
-        };
-        let actual = serde_json::to_string(&value)?;
-
-        assert_eq!(expected, actual);
-        Ok(())
+    /// The structure used by the client when sending requests to the server.
+    ///
+    /// # Example
+    /// ```
+    /// # use serde_json::Result;
+    /// # use siguldry::v2::protocol::json::OuterRequest;
+    /// # fn main() -> Result<()> {
+    /// let data = r#"
+    ///     {
+    ///         "session_id": "00000000-0000-0000-0000-000000000000",
+    ///         "request_id": 42,
+    ///         "request": {
+    ///             "who_am_i": {}
+    ///         }
+    ///     }
+    /// "#;
+    /// let whoami_response: OuterResponse = serde_json::from_str(data)?;
+    ///
+    /// # Ok(())
+    /// }
+    /// ```
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub(crate) struct OuterRequest {
+        /// The session ID this request is a part of.
+        pub(crate) session_id: Uuid,
+        /// The request ID; this should be a unique integer within the session,
+        /// but has no other requirements. The response will include the same ID
+        /// so it can be used to ensure the response matches the request.
+        pub(crate) request_id: u64,
+        /// The actual client request for the server.
+        pub(crate) request: Request,
     }
 
-    #[test]
-    fn json_deserialize_message() -> anyhow::Result<()> {
-        let data = r#"{
-                "session_id": "00000000-0000-0000-0000-000000000000",
-                "request_id": 42,
-                "payload": {
-                    "request": {
-                        "who_am_i": {}
-                    }
-                }
-            }"#;
-        let hello_request: Message = serde_json::from_str(data)?;
-        assert!(matches!(
-            hello_request.payload,
-            Payload::Request(Request::WhoAmI {})
-        ));
-        assert_eq!(hello_request.session_id, Uuid::nil());
+    /// The structure used by the server when sending responses to the client.
+    ///
+    /// # Example
+    /// ```
+    /// # use serde_json::Result;
+    /// # use siguldry::v2::protocol::json::OuterResponse;
+    /// # fn main() -> Result<()> {
+    /// let data = r#"
+    ///     {
+    ///         "session_id": "00000000-0000-0000-0000-000000000000",
+    ///         "request_id": 42,
+    ///         "response": {
+    ///             "who_am_i": {"user": "dadams"}
+    ///         }
+    ///     }
+    /// "#;
+    /// let whoami_response: OuterResponse = serde_json::from_str(data)?;
+    ///
+    /// # Ok(())
+    /// }
+    /// ```
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub(crate) struct OuterResponse {
+        /// The session ID this request is a part of.
+        pub(crate) session_id: Uuid,
+        /// The request ID; this should be a unique integer within the session,
+        /// but has no other requirements. The response will include the same ID
+        /// so it can be used to ensure the response matches the request.
+        pub(crate) request_id: u64,
+        /// The serialized [`Request`] or [`Response`].
+        pub(crate) response: Response,
+    }
 
-        Ok(())
+    /// The set of requests a client and server must support.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub(crate) enum Request {
+        WhoAmI {},
+        NewUser { username: String },
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub(crate) enum Response {
+        WhoAmI { user: String },
+        Error { reason: ServerError },
     }
 }
+
+/// Errors that occur when handling client requests.
+///
+/// These errors are particular to the request and the server will continue
+/// to process additional requests on the connection.
+#[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerError {}

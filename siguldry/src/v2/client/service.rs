@@ -18,13 +18,18 @@ use tower::{
     Service,
 };
 use tracing::{instrument, Instrument};
+use uuid::Uuid;
 use zerocopy::{IntoBytes, TryFromBytes};
 
 use crate::v2::{
     client::{ConnectionConfig, Req},
     error::ClientError,
     nestls::Nestls,
-    protocol::{self, Frame, Response, Role},
+    protocol::{
+        self,
+        json::{OuterRequest, OuterResponse, Response},
+        Frame, Role,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -95,20 +100,21 @@ impl<R> Service<R> for MakeClientService {
 pub(crate) struct ClientService {
     request_tx: mpsc::Sender<(Frame, Bytes, oneshot::Sender<Response>)>,
     connection_actor: Arc<JoinHandle<Result<(), ClientError>>>,
-    session_id: String,
+    session_id: Uuid,
+    request_id: u64,
 }
 
 impl ClientService {
     fn new(connection: Nestls) -> Self {
         let (request_tx, request_rx) = mpsc::channel(128);
-        let session_id = connection.session_id().to_string();
+        let session_id = connection.session_id();
         let connection_actor =
             Arc::new(tokio::spawn(Self::request_handler(connection, request_rx)));
-        // TODO switch to actor to hold the connection
         Self {
             request_tx,
             connection_actor,
             session_id,
+            request_id: 0,
         }
     }
 
@@ -137,8 +143,8 @@ impl ClientService {
 
             let mut response_bytes = response_buffer.into_inner().freeze();
             let binary_bytes = response_bytes.split_off(json_size);
-            let json_response: Response = serde_json::from_slice(&response_bytes).unwrap();
-            respond_to.send(json_response).unwrap();
+            let json_response: OuterResponse = serde_json::from_slice(&response_bytes).unwrap();
+            respond_to.send(json_response.response).unwrap();
         }
 
         Ok(())
@@ -159,9 +165,15 @@ impl Service<Req> for ClientService {
         }
     }
 
-    #[instrument(skip_all, fields(session_id = self.session_id))]
+    #[instrument(skip_all, fields(session_id = self.session_id.to_string()))]
     fn call(&mut self, request: Req) -> Self::Future {
-        let json = serde_json::to_string(&request.message).unwrap();
+        let json = OuterRequest {
+            session_id: self.session_id,
+            request_id: self.request_id,
+            request: request.message,
+        };
+        self.request_id += 1;
+        let json = serde_json::to_string(&json).unwrap();
         let json = Bytes::from_owner(json);
         let binary = request.binary.unwrap_or_else(|| bytes::Bytes::new());
         let request_frame = protocol::Frame::new(

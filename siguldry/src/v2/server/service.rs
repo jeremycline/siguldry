@@ -16,7 +16,12 @@ use zerocopy::{IntoBytes, TryFromBytes};
 use crate::v2::{
     error::ClientError as Error,
     nestls::Nestls,
-    protocol::{self, Request, Response, Role},
+    protocol::{
+        self,
+        json::{Request, Response},
+        Role,
+    },
+    server::handlers,
     tls,
 };
 
@@ -95,7 +100,7 @@ async fn handle(mut conn: Nestls) -> Result<(), anyhow::Error> {
         let mut frame_buffer = [0_u8; std::mem::size_of::<protocol::Frame>()];
         conn.read_exact(&mut frame_buffer).await?;
         let frame = protocol::Frame::try_ref_from_bytes(&frame_buffer)
-            .map_err(|e| anyhow::anyhow!("Invalid frame: {:?}", e))?;
+            .map_err(|e| protocol::Error::Framing(format!("Invalid frame: {:?}", e)))?;
         tracing::debug!(?frame, "New request frame received");
 
         let json_size: usize = frame
@@ -116,16 +121,46 @@ async fn handle(mut conn: Nestls) -> Result<(), anyhow::Error> {
         let mut request_bytes = request_buffer.into_inner().freeze();
 
         let binary_bytes = request_bytes.split_off(json_size);
-        let json_request: Request = serde_json::from_slice(&request_bytes)
+        let outer_request: protocol::json::OuterRequest = serde_json::from_slice(&request_bytes)
             .context("The request's JSON could not be deserialized")?;
-        match json_request {
-            Request::WhoAmI {} => {
-                let response = serde_json::to_string(&Response::WhoAmI { user: user.clone() })?;
-                let response_frame = protocol::Frame::new(response.as_bytes().len().try_into()?, 0);
-                conn.write_all(response_frame.as_bytes()).await?;
-                conn.write_all(response.as_bytes()).await?;
-            }
+        let response = match outer_request.request {
+            Request::WhoAmI {} => handlers::who_am_i(user.clone()).await,
             Request::NewUser { username } => todo!(),
+        };
+
+        match response {
+            Ok(response) => {
+                let json_response = protocol::json::OuterResponse {
+                    session_id: outer_request.session_id,
+                    request_id: outer_request.request_id,
+                    response: response.json,
+                };
+                let json_response = serde_json::to_string(&json_response)?;
+                let binary_size = response.binary.as_ref().map(|b| b.len()).unwrap_or(0);
+
+                let response_frame = protocol::Frame::new(
+                    json_response.as_bytes().len().try_into()?,
+                    binary_size.try_into()?,
+                );
+                conn.write_all(response_frame.as_bytes()).await?;
+                conn.write_all(json_response.as_bytes()).await?;
+                if let Some(binary) = &response.binary {
+                    conn.write_all(binary).await?;
+                }
+            }
+            Err(reason) => {
+                //let json = serde_json::to_string(protocol::json::)
+                let json_response = protocol::json::OuterResponse {
+                    session_id: outer_request.session_id,
+                    request_id: outer_request.request_id,
+                    response: protocol::json::Response::Error { reason },
+                };
+                let json_response = serde_json::to_string(&json_response)?;
+                let response_frame =
+                    protocol::Frame::new(json_response.as_bytes().len().try_into()?, 0);
+                conn.write_all(response_frame.as_bytes()).await?;
+                conn.write_all(json_response.as_bytes()).await?;
+            }
         }
     }
 
