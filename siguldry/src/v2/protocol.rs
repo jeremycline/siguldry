@@ -68,8 +68,6 @@
 //! | u64 | Binary size (bytes) |
 //! |---------------------------|
 
-use std::fmt::Display;
-
 use openssl::nid::Nid;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt};

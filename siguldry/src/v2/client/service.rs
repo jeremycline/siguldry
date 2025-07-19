@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) Microsoft Corporation.
 
-//! This module provides a Sigul client.
-
+//! Tower service implementing the basic siguldry client.
 use std::{fmt::Debug, future::Future, pin::Pin, sync::Arc, task::Poll, time::Duration};
 
 use anyhow::Context;
@@ -14,112 +13,28 @@ use tokio::{
     time::Instant,
 };
 use tower::{
-    reconnect::Reconnect,
     retry::backoff::{Backoff, ExponentialBackoff, MakeBackoff},
     util::rng::HasherRng,
-    Service, ServiceExt,
+    Service,
 };
 use tracing::{instrument, Instrument};
 use zerocopy::{IntoBytes, TryFromBytes};
 
 use crate::v2::{
+    client::{ConnectionConfig, Req},
     error::ClientError,
     nestls::Nestls,
-    protocol::{self, Frame, Request, Response, Role},
-    tls,
+    protocol::{self, Frame, Response, Role},
 };
 
-/// The client connection configuration.
-#[derive(Debug)]
-pub struct ConnectionConfig {
-    tls_config: tls::ClientConfig,
-    bridge_address: String,
-    bridge_hostname: String,
-    server_hostname: String,
-}
-
-impl ConnectionConfig {
-    /// Create a new client connection configuration.
-    pub fn new(
-        tls_config: tls::ClientConfig,
-        bridge_address: String,
-        bridge_hostname: String,
-        server_hostname: String,
-    ) -> Self {
-        Self {
-            tls_config,
-            bridge_address,
-            bridge_hostname,
-            server_hostname,
-        }
-    }
-}
-
-/// A siguldry client.
-pub struct Client {
-    inner: Reconnect<MakeClientService, ()>,
-}
-
 #[derive(Debug, Clone)]
-pub(crate) struct Req {
-    message: Request,
-    binary: Option<Bytes>,
-}
-
-impl Client {
-    /// Create a new client
-    pub fn new(config: ConnectionConfig) -> Self {
-        let inner = Reconnect::new(MakeClientService::new(config), ());
-        Self { inner }
-    }
-
-    async fn send(&mut self, request: Req) -> Result<Response, ClientError> {
-        self.inner
-            .ready()
-            .await
-            .map_err(|err| *err.downcast::<ClientError>().expect("TODO"))?
-            .call(request)
-            .await
-            .map_err(|err| *err.downcast::<ClientError>().expect("huh"))
-    }
-
-    async fn reconnecting_send(&mut self, request: Req) -> Result<Response, ClientError> {
-        loop {
-            match self.send(request.clone()).await {
-                Ok(response) => break Ok(response),
-                Err(ClientError::Connection(error)) => {
-                    tracing::info!(?error, "Failed to connect");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-                Err(err) => break Err(err),
-            }
-        }
-    }
-
-    /// Attempt to authenticate against the server.
-    ///
-    /// Returns the username you successfully authenticated as.
-    pub async fn who_am_i(&mut self) -> Result<String, ClientError> {
-        let request = protocol::Request::WhoAmI {};
-        let request = Req {
-            message: request,
-            binary: None,
-        };
-        let response = self.reconnecting_send(request).await?;
-        match response {
-            Response::WhoAmI { user } => Ok(user),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct MakeClientService {
+pub(crate) struct MakeClientService {
     config: Arc<Mutex<ConnectionConfig>>,
     last_connection: Option<Instant>,
 }
 
 impl MakeClientService {
-    fn new(config: ConnectionConfig) -> Self {
+    pub(crate) fn new(config: ConnectionConfig) -> Self {
         Self {
             config: Arc::new(Mutex::new(config)),
             last_connection: None,
@@ -177,7 +92,7 @@ impl<R> Service<R> for MakeClientService {
 }
 
 #[derive(Clone)]
-struct ClientService {
+pub(crate) struct ClientService {
     request_tx: mpsc::Sender<(Frame, Bytes, oneshot::Sender<Response>)>,
     connection_actor: Arc<JoinHandle<Result<(), ClientError>>>,
     session_id: String,
@@ -275,7 +190,7 @@ impl Service<Req> for ClientService {
 }
 
 #[derive(Debug, Clone)]
-struct RetryPolicy {
+pub(crate) struct RetryPolicy {
     attempts: usize,
     backoff: ExponentialBackoff,
 }

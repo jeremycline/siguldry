@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) Microsoft Corporation.
+
 use std::str::FromStr;
 
 use anyhow::Context;

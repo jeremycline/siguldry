@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) Microsoft Corporation.
-#![warn(missing_docs)]
 
 /*!
 # Siguldry

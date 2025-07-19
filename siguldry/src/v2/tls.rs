@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) Microsoft Corporation.
+
 use std::{fmt::Debug, io::Read, path::Path};
 
 use crate::v2::error::ClientError as Error;
