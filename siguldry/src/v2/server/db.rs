@@ -41,7 +41,6 @@ pub async fn pool(db_uri: &str) -> anyhow::Result<Pool<Sqlite>> {
 pub struct User {
     pub id: i64,
     pub name: String,
-    pub admin: bool,
 }
 
 impl User {
@@ -56,19 +55,16 @@ impl User {
     pub async fn create(
         conn: &mut SqliteConnection,
         name: &str,
-        admin: bool,
     ) -> Result<User, sqlx::Error> {
         sqlx::query!(
-            "INSERT INTO users (name, admin) VALUES (?, ?) RETURNING id",
+            "INSERT INTO users (name) VALUES (?) RETURNING id",
             name,
-            admin
         )
         .fetch_one(&mut *conn)
         .await
         .map(|record| User {
             id: record.id,
             name: name.to_string(),
-            admin,
         })
     }
 
@@ -79,4 +75,10 @@ impl User {
             .await
             .map(|result| result.rows_affected())
     }
+}
+
+
+pub struct Key {
+    pub id: i64,
+    pub name: String,
 }

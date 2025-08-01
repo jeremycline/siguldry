@@ -14,17 +14,3 @@ pub(crate) async fn who_am_i(user: &User) -> Result<Response, ServerError> {
     }
     .into())
 }
-
-pub(crate) async fn new_user(
-    user: &User,
-    conn: &mut SqliteConnection,
-    username: String,
-    admin: bool,
-) -> Result<Response, ServerError> {
-    if user.admin {
-        db::User::create(conn, &username, admin).await.unwrap();
-        Ok(json::Response::NewUser { username, admin }.into())
-    } else {
-        Err(ServerError::RequiresAdmin)
-    }
-}

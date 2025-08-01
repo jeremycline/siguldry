@@ -178,9 +178,6 @@ async fn handle(db: Pool<Sqlite>, mut conn: Nestls) -> Result<(), anyhow::Error>
         let mut db_transaction = db.begin().await?;
         let response = match outer_request.request {
             Request::WhoAmI {} => handlers::who_am_i(&user).await,
-            Request::NewUser { username, admin } => {
-                handlers::new_user(&user, &mut db_transaction, username, admin).await
-            }
         };
 
         match response {

@@ -366,14 +366,12 @@ pub(crate) mod json {
     #[serde(rename_all = "snake_case")]
     pub(crate) enum Request {
         WhoAmI {},
-        NewUser { username: String, admin: bool },
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename_all = "snake_case")]
     pub(crate) enum Response {
         WhoAmI { user: String },
-        NewUser { username: String, admin: bool },
         Error { reason: ServerError },
     }
 }
