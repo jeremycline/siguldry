@@ -118,7 +118,7 @@ async fn main() -> anyhow::Result<()> {
     opts.credentials_directory
         .as_ref()
         .map(|path| config.credentials.with_credentials_dir(path));
-    let mut client = Client::new(config)?;
+    let client = Client::new(config)?;
     match opts.command {
         Command::Whoami => {
             let user = client.who_am_i().await?;

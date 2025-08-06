@@ -74,10 +74,6 @@ version = "0.6"
 version = "0.9"
 optional = true
 
-[dependencies.tower]
-version = "0.5"
-features = ["make", "retry", "reconnect", "timeout", "util"]
-
 [dependencies.tracing]
 version = "0.1.36"
 

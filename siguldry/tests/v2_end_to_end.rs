@@ -16,7 +16,7 @@ use siguldry::v2::{
     error::{ClientError, ConnectionError},
     server,
 };
-use tokio::process::Command;
+use tokio::{join, process::Command};
 use tracing::Instrument;
 
 #[derive(Clone)]
@@ -277,6 +277,42 @@ async fn bridge_rejects_client_cert_empty_common_name() -> anyhow::Result<()> {
     drop(client);
     instance.server.halt().await?;
     instance.bridge.halt().await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_clients() -> anyhow::Result<()> {
+    let tempdir = tempfile::TempDir::new()?;
+    let creds =
+        create_credentials(tempdir.path(), "localhost", "sigul-server", "sigul-client").await?;
+    let client_creds = creds.client.clone();
+    let instance = create_instance(Some(creds)).await?;
+    let mut clients = tokio::task::JoinSet::new();
+
+    for _ in 0..250 {
+        let client_config = client::Config {
+            server_hostname: "sigul-server".to_string(),
+            bridge_hostname: "localhost".to_string(),
+            bridge_port: instance.bridge.client_port(),
+            credentials: client_creds.clone(),
+        };
+        let client = client::Client::new(client_config)?;
+        clients.spawn(async move {
+            for _ in 0..100 {
+                let username = client.who_am_i().await?;
+                assert_eq!(username, "sigul-client");
+            }
+
+            Ok::<_, anyhow::Error>(())
+        });
+    }
+
+    let results = clients
+        .join_all()
+        .await
+        .into_iter()
+        .collect::<Result<(), _>>()?;
 
     Ok(())
 }

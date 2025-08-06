@@ -2,100 +2,30 @@
 // Copyright (c) Microsoft Corporation.
 
 //! Tower service implementing the basic siguldry client.
-use std::{fmt::Debug, future::Future, pin::Pin, sync::Arc, task::Poll, time::Duration};
+use std::sync::Arc;
 
 use anyhow::Context;
 use bytes::{BufMut, Bytes, BytesMut};
-use openssl::ssl::SslConnector;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{mpsc, oneshot},
     task::JoinHandle,
-    time::Instant,
 };
-use tower::{
-    retry::backoff::{Backoff, ExponentialBackoff, MakeBackoff},
-    util::rng::HasherRng,
-    Service,
-};
-use tracing::{instrument, Instrument};
+use tracing::instrument;
 use uuid::Uuid;
 use zerocopy::{IntoBytes, TryFromBytes};
 
 use crate::v2::{
-    client::Config,
     error::ClientError,
     nestls::Nestls,
     protocol::{
         self,
         json::{OuterRequest, OuterResponse, Response},
-        Frame, Request, Role,
+        Frame, Request,
     },
 };
 
-#[derive(Debug, Clone)]
-pub(crate) struct MakeClientService {
-    config: Config,
-    tls_config: SslConnector,
-    last_connection: Option<Instant>,
-}
-
-impl MakeClientService {
-    pub(crate) fn new(config: Config) -> Result<Self, ClientError> {
-        let tls_config = config.credentials.ssl_connector()?;
-        Ok(Self {
-            config,
-            tls_config,
-            last_connection: None,
-        })
-    }
-}
-
-impl<R> Service<R> for MakeClientService {
-    type Response = tower::retry::Retry<RetryPolicy, tower::timeout::Timeout<ClientService>>;
-    type Error = ClientError;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
-
-    fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, _req: R) -> Self::Future {
-        let last_connection_time = self.last_connection;
-        let interval = Duration::from_secs(1);
-        self.last_connection = Some(Instant::now());
-
-        let bridge_port = self.config.bridge_port;
-        let bridge_hostname = self.config.bridge_hostname.clone();
-        let server_hostname = self.config.server_hostname.clone();
-        let bridge_ssl = self.tls_config.configure();
-        let server_ssl = self.tls_config.configure();
-
-        let fut = async move {
-            let bridge_ssl = bridge_ssl?.into_ssl(&bridge_hostname)?;
-            let server_ssl = server_ssl?.into_ssl(&server_hostname)?;
-            if let Some(last_connection_time) = last_connection_time {
-                let duration_since = Instant::now() - last_connection_time;
-                tokio::time::sleep(interval.saturating_sub(duration_since)).await;
-            }
-
-            let conn = Nestls::builder(bridge_ssl, Role::Client)
-                .connect(format!("{}:{}", &bridge_hostname, bridge_port), server_ssl)
-                .await?;
-
-            let policy = RetryPolicy::new();
-            let client = tower::ServiceBuilder::new()
-                .retry(policy)
-                .timeout(Duration::from_secs(30))
-                .service(ClientService::new(conn));
-            tracing::info!("new client service created");
-            Ok(client)
-        };
-        Box::pin(fut)
-    }
-}
-
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct ClientService {
     request_tx: mpsc::Sender<(Frame, Bytes, oneshot::Sender<Response>)>,
     connection_actor: Arc<JoinHandle<Result<(), ClientError>>>,
@@ -104,7 +34,7 @@ pub(crate) struct ClientService {
 }
 
 impl ClientService {
-    fn new(connection: Nestls) -> Self {
+    pub(crate) fn new(connection: Nestls) -> Self {
         let (request_tx, request_rx) = mpsc::channel(128);
         let session_id = connection.session_id();
         let connection_actor =
@@ -151,24 +81,9 @@ impl ClientService {
 
         Ok(())
     }
-}
-
-impl Service<Request> for ClientService {
-    type Response = Response;
-    type Error = ClientError;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
-
-    fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> Poll<Result<(), Self::Error>> {
-        if self.connection_actor.is_finished() {
-            // The actor should only exit if the connection failed
-            Poll::Ready(Err(ClientError::Fatal(anyhow::anyhow!("placeholder"))))
-        } else {
-            Poll::Ready(Ok(()))
-        }
-    }
 
     #[instrument(skip_all, fields(session_id = self.session_id.to_string()))]
-    fn call(&mut self, request: Request) -> Self::Future {
+    pub(crate) async fn call(&mut self, request: Request) -> Result<Response, ClientError> {
         let json = OuterRequest {
             session_id: self.session_id,
             request_id: self.request_id,
@@ -189,70 +104,11 @@ impl Service<Request> for ClientService {
         let (response_tx, response_rx) = oneshot::channel();
         let request_tx = self.request_tx.clone();
 
-        let fut = async move {
-            request_tx
-                .send((request_frame, request, response_tx))
-                .await
-                .context("Couldn't send request to actor")?;
-            let response = response_rx.await.context("Actor channel didn't respond")?;
-            Ok(response)
-        }
-        .instrument(tracing::Span::current());
-
-        Box::pin(fut)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct RetryPolicy {
-    attempts: usize,
-    backoff: ExponentialBackoff,
-}
-
-impl RetryPolicy {
-    fn new() -> Self {
-        let backoff = tower::retry::backoff::ExponentialBackoffMaker::new(
-            Duration::from_millis(500),
-            Duration::from_secs(3),
-            50.0,
-            HasherRng::new(),
-        )
-        .unwrap()
-        .make_backoff();
-        Self {
-            attempts: 0,
-            backoff,
-        }
-    }
-}
-
-impl tower::retry::Policy<Request, Response, tower::BoxError> for RetryPolicy {
-    type Future = <ExponentialBackoff as Backoff>::Future;
-
-    fn retry(
-        &mut self,
-        _req: &mut Request,
-        result: &mut Result<Response, tower::BoxError>,
-    ) -> Option<Self::Future> {
-        match result {
-            Ok(_) => None,
-            Err(_error) => {
-                // TODO sort through errors to retry vs not
-                if self.attempts > 3 {
-                    return None;
-                }
-                self.attempts += 1;
-                let backoff = self.backoff.next_backoff();
-                let retry_in = backoff
-                    .deadline()
-                    .saturating_duration_since(tokio::time::Instant::now());
-                tracing::info!(?retry_in, attempt = self.attempts, "Retrying request");
-                Some(self.backoff.next_backoff())
-            }
-        }
-    }
-
-    fn clone_request(&mut self, req: &Request) -> Option<Request> {
-        Some(req.clone())
+        request_tx
+            .send((request_frame, request, response_tx))
+            .await
+            .context("Couldn't send request to actor")?;
+        let response = response_rx.await.context("Actor channel didn't respond")?;
+        Ok(response)
     }
 }
