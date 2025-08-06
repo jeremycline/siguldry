@@ -37,7 +37,7 @@ pub async fn pool(db_uri: &str) -> anyhow::Result<Pool<Sqlite>> {
         .context("Failed to connect to the database")
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct User {
     pub id: i64,
     pub name: String,
@@ -52,20 +52,14 @@ impl User {
     }
 
     #[instrument(skip(conn))]
-    pub async fn create(
-        conn: &mut SqliteConnection,
-        name: &str,
-    ) -> Result<User, sqlx::Error> {
-        sqlx::query!(
-            "INSERT INTO users (name) VALUES (?) RETURNING id",
-            name,
-        )
-        .fetch_one(&mut *conn)
-        .await
-        .map(|record| User {
-            id: record.id,
-            name: name.to_string(),
-        })
+    pub async fn create(conn: &mut SqliteConnection, name: &str) -> Result<User, sqlx::Error> {
+        sqlx::query!("INSERT INTO users (name) VALUES (?) RETURNING id", name,)
+            .fetch_one(&mut *conn)
+            .await
+            .map(|record| User {
+                id: record.id,
+                name: name.to_string(),
+            })
     }
 
     #[instrument(skip(conn))]
@@ -77,8 +71,52 @@ impl User {
     }
 }
 
-
 pub struct Key {
     pub id: i64,
     pub name: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn create_delete_user() -> Result<()> {
+        let db_pool = pool("sqlite::memory:").await?;
+        migrate(&db_pool).await?;
+        let mut conn = db_pool.begin().await?;
+        let name = "test-user";
+
+        let user = User::create(&mut conn, name).await?;
+        let fetched_user = User::get(&mut conn, name).await?;
+        assert_eq!(user, fetched_user);
+        assert_eq!(user.name, name);
+
+        let users_deleted = User::delete(&mut conn, name).await?;
+        assert_eq!(1, users_deleted);
+        assert_eq!(0, User::delete(&mut conn, name).await?);
+
+        let fetched_user = User::get(&mut conn, name).await;
+        assert!(matches!(fetched_user, Err(sqlx::Error::RowNotFound)));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn user_must_be_unique() -> Result<()> {
+        let db_pool = pool("sqlite::memory:").await?;
+        migrate(&db_pool).await?;
+        let mut conn = db_pool.begin().await?;
+        let name = "test-user";
+
+        _ = User::create(&mut conn, name).await?;
+        let failed_user = User::create(&mut conn, name).await;
+        assert!(failed_user.is_err_and(|error| {
+            "UNIQUE constraint failed: users.name" == error.as_database_error().unwrap().message()
+        }));
+
+        Ok(())
+    }
 }

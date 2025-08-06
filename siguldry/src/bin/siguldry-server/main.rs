@@ -189,9 +189,7 @@ async fn main() -> anyhow::Result<()> {
             let mut conn = db_pool.begin().await?;
             match command {
                 ManagementCommands::Users(user_commands) => match user_commands {
-                    UserCommands::Add { name } => {
-                        _ = db::User::create(&mut conn, &name).await?
-                    }
+                    UserCommands::Add { name } => _ = db::User::create(&mut conn, &name).await?,
                     UserCommands::Remove { name } => {
                         let users_deleted = db::User::delete(&mut conn, &name).await?;
                         println!("Deleted {} user(s) from the database", users_deleted);

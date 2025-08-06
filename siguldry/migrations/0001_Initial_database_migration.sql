@@ -4,16 +4,18 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS "key_types" (
     "type" TEXT NOT NULL PRIMARY KEY
 );
-INSERT INTO key_types(type) VALUES ("RSA");
-INSERT INTO key_types(type) VALUES ("ECC");
+-- 4096 bit RSA keys
+INSERT INTO key_types(type) VALUES ("rsa4k");
+-- Ed25519 ECC keys
+INSERT INTO key_types(type) VALUES ("Ed25519");
 
 CREATE TABLE IF NOT EXISTS "key_locations" (
     location TEXT NOT NULL PRIMARY KEY
 );
--- Accessible via PKCS11
-INSERT INTO key_locations(location) VALUES ("PKCS11");
--- Managed by GPG
-INSERT INTO key_locations(location) VALUES ("GPG");
+-- Keys accessible via PKCS11; it's assumed p11-kit is being used to manage pkcs11 modules.
+INSERT INTO key_locations(location) VALUES ("pkcs11");
+-- Managed by Sequoia in its "softkey" keystore. These keys are not hardware-backed.
+INSERT INTO key_locations(location) VALUES ("sequoia-softkey");
 
 CREATE TABLE IF NOT EXISTS "keys" (
     "id" INTEGER NOT NULL PRIMARY KEY,
