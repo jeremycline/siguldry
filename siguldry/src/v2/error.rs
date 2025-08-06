@@ -5,7 +5,7 @@
 
 use zerocopy::TryCastError;
 
-use crate::v2::protocol::{Error as ProtocolError, ServerError};
+pub use crate::v2::protocol::{Error as ProtocolError, ServerError};
 
 /// Errors that occur during the connection.
 #[derive(Debug, thiserror::Error)]
@@ -19,7 +19,7 @@ pub enum ConnectionError {
     /// Be aware, however, that it could be because the specified hostname or
     /// port is incorrect, in which case retrying will never succeed.
     #[error("an I/O error occurred: {0}")]
-    Io(#[from] std::io::Error),
+    Io(std::io::Error),
 
     /// An OpenSSL error occurred.
     ///
@@ -46,6 +46,21 @@ pub enum ConnectionError {
     /// This is almost certainly a bug.
     #[error(transparent)]
     Protocol(#[from] ProtocolError),
+}
+
+impl From<std::io::Error> for ConnectionError {
+    fn from(error: std::io::Error) -> Self {
+        // I/O errors may occur due to a TLS error, like if the server rejects the client certificate
+        // but then the client reads from the socket. Map those type of errors to our more specific
+        // error variants.
+        if let Some(ssl_error) = std::error::Error::source(&error)
+            .and_then(|error| error.downcast_ref::<openssl::error::ErrorStack>())
+        {
+            ConnectionError::Ssl(ssl_error.to_owned().into())
+        } else {
+            ConnectionError::Io(error)
+        }
+    }
 }
 
 impl<S, D> From<TryCastError<S, D>> for ConnectionError

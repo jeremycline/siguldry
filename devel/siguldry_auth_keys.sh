@@ -1,17 +1,13 @@
 #!/bin/bash
 
-# This script accepts three arguments: the server commonName, the bridge commonName, and the client commonName
-# If they are not provided, they default to sigul-{server,bridge,client}.
+# This script accepts three arguments: the server commonName, the bridge commonName, and the client
+# commonName. For testing purposes, "sigul-server", "localhost", and "sigul-client" are recommended.
 
 set -xeuo pipefail
 
-SERVER_DEFAULT_CN="sigul-server"
-BRIDGE_DEFAULT_CN="sigul-bridge"
-CLIENT_DEFAULT_CN="sigul-client"
-
-SERVER_CN="${1:-$SERVER_DEFAULT_CN}"
-BRIDGE_CN="${2:-$BRIDGE_DEFAULT_CN}"
-CLIENT_CN="${3:-$CLIENT_DEFAULT_CN}"
+SERVER_CN="${1}"
+BRIDGE_CN="${2}"
+CLIENT_CN="${3}"
 
 # Create a CA, then sign three certificates for the server, bridge, and client respectively.
 mkdir -p creds/

@@ -193,6 +193,7 @@ impl ProtocolAck {
 
         match ack.status {
             BridgeStatus::Ok => Ok(session_id),
+            BridgeStatus::MissingCommonName => Err(Error::MissingCommonName.into()),
             other => Err(Error::Bridge(other.to_string()).into()),
         }
     }
@@ -243,7 +244,7 @@ pub(crate) fn peer_common_name<S>(stream: &SslStream<S>) -> Result<String, Error
 }
 
 /// Possible errors due to protocol violations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, PartialEq)]
 #[non_exhaustive]
 pub enum Error {
     /// The client certificate does not include a Common Name, which is used to determine the
