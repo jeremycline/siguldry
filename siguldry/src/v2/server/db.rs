@@ -52,6 +52,13 @@ impl User {
     }
 
     #[instrument(skip(conn))]
+    pub async fn list(conn: &mut SqliteConnection) -> Result<Vec<User>, sqlx::Error> {
+        sqlx::query_as!(User, "SELECT * FROM users;")
+            .fetch_all(&mut *conn)
+            .await
+    }
+
+    #[instrument(skip(conn))]
     pub async fn create(conn: &mut SqliteConnection, name: &str) -> Result<User, sqlx::Error> {
         sqlx::query!("INSERT INTO users (name) VALUES (?) RETURNING id", name,)
             .fetch_one(&mut *conn)

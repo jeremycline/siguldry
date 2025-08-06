@@ -5,7 +5,7 @@ use sqlx::SqliteConnection;
 
 use crate::v2::{
     protocol::{json, Response, ServerError},
-    server::db::{self, User},
+    server::db::User,
 };
 
 pub(crate) async fn who_am_i(user: &User) -> Result<Response, ServerError> {
@@ -13,4 +13,14 @@ pub(crate) async fn who_am_i(user: &User) -> Result<Response, ServerError> {
         user: user.name.clone(),
     }
     .into())
+}
+
+pub(crate) async fn list_users(conn: &mut SqliteConnection) -> Result<Response, ServerError> {
+    let users = User::list(conn)
+        .await?
+        .into_iter()
+        .map(|user| user.name)
+        .collect();
+
+    Ok(json::Response::ListUsers { users }.into())
 }

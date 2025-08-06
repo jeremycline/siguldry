@@ -74,8 +74,10 @@ struct Cli {
 
 #[derive(clap::Subcommand, Debug)]
 enum Command {
+    /// Attempt to authenticate with the server and print the username of the authenticated user.
     Whoami,
-
+    /// List the users on the server.
+    ListUsers,
     /// See the current configuration, or the defaults if no configuration file is supplied.
     Config,
 }
@@ -121,6 +123,11 @@ async fn main() -> anyhow::Result<()> {
         Command::Whoami => {
             let user = client.who_am_i().await?;
             println!("Hello, {user}, you can successfully authenticate with the server!");
+        }
+        Command::ListUsers => {
+            let users = client.list_users().await?;
+            let users = users.join("\n");
+            println!("{users}");
         }
         Command::Config => unreachable!("Command handled prior to this match"),
     }

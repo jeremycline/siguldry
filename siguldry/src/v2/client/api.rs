@@ -67,4 +67,18 @@ impl Client {
             _other => panic!("don't panic here"),
         }
     }
+
+    pub async fn list_users(&mut self) -> Result<Vec<String>, ClientError> {
+        let request = Request {
+            message: protocol::json::Request::ListUsers {},
+            binary: None,
+        };
+
+        let response = self.reconnecting_send(request).await?;
+        match response {
+            Response::ListUsers { users } => Ok(users),
+            Response::Error { reason } => Err(reason.into()),
+            _other => panic!("don't panic here"),
+        }
+    }
 }

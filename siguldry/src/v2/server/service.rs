@@ -178,6 +178,7 @@ async fn handle(db: Pool<Sqlite>, mut conn: Nestls) -> Result<(), anyhow::Error>
         let mut db_transaction = db.begin().await?;
         let response = match outer_request.request {
             Request::WhoAmI {} => handlers::who_am_i(&user).await,
+            Request::ListUsers {} => handlers::list_users(&mut db_transaction).await,
         };
 
         match response {
@@ -201,7 +202,6 @@ async fn handle(db: Pool<Sqlite>, mut conn: Nestls) -> Result<(), anyhow::Error>
             }
             Err(reason) => {
                 db_transaction.rollback().await?;
-                //let json = serde_json::to_string(protocol::json::)
                 let json_response = protocol::json::OuterResponse {
                     session_id: outer_request.session_id,
                     request_id: outer_request.request_id,
