@@ -177,17 +177,10 @@ async fn inner_listen(
                 break 'accept;
             },
             connections = async { tokio::join!(client_conns_rx.recv(), server_conns_rx.recv()) } => {
-                if let (Some(mut client_conn), Some(mut server_conn)) = connections {
+                if let (Some(client_conn), Some(server_conn)) = connections {
                     let ack = protocol::ProtocolAck::new(protocol::BridgeStatus::Ok);
-                    client_conn.write_all(ack.as_bytes()).await?;
-                    tracing::trace!("Sent client ack");
-                    server_conn.write_all(ack.as_bytes()).await?;
-                    tracing::trace!("Sent server ack");
-
-                    let session_id = Uuid::from_u128(ack.session_id.get());
-                    tracing::info!(?session_id, "Bridging new connection");
                     request_tracker.spawn(
-                        bridge(session_id, client_conn, server_conn).instrument(tracing::Span::current()),
+                        bridge(ack, client_conn, server_conn).instrument(tracing::Span::current()),
                     );
 
                 } else {
@@ -279,13 +272,18 @@ pub async fn listen(config: Config) -> anyhow::Result<Listener> {
     })
 }
 
-#[instrument(skip(client_conn, server_conn), ret)]
+#[instrument(skip_all, ret, err, fields(session_id = Uuid::from_u128(ack.session_id.get()).to_string()))]
 async fn bridge(
-    session_id: Uuid,
+    ack: ProtocolAck,
     mut client_conn: SslStream<TcpStream>,
     mut server_conn: SslStream<TcpStream>,
 ) -> anyhow::Result<()> {
-    // TODO timeout all the things
+    tokio::try_join!(
+        client_conn.write_all(ack.as_bytes()),
+        server_conn.write_all(ack.as_bytes())
+    )?;
+    tracing::trace!("Client and server protocol acknowledgements sent");
+
     let size = 1024 * 64;
     let (client_sent_bytes, server_sent_bytes) =
         tokio::io::copy_bidirectional_with_sizes(&mut client_conn, &mut server_conn, size, size)
