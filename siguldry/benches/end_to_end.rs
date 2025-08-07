@@ -1,21 +1,21 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) Microsoft Corporation.
+
+//! Performance benchmarks for end-to-end scenarios.
+
 #![cfg(all(feature = "v2-server", feature = "v2-client"))]
 
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     str::FromStr,
+    time::Duration,
 };
 
 use anyhow::bail;
 use assert_cmd::cargo::CommandCargoExt;
-use siguldry::v2::{
-    bridge, client,
-    config::Credentials,
-    error::{ClientError, ConnectionError},
-    server,
-};
+use criterion::{criterion_group, criterion_main, Criterion};
+use siguldry::v2::{bridge, client, config::Credentials, server};
 use tokio::process::Command;
 use tracing::Instrument;
 
@@ -65,13 +65,13 @@ async fn create_credentials(
     })
 }
 
+// Dropping TempDir cleans up the directory, but it needs to live to the end of the test.
+#[allow(dead_code)]
 struct Instance {
     pub server: server::service::Listener,
     pub bridge: bridge::Listener,
     pub client: client::Client,
     pub creds: Creds,
-    // Dropping TempDir cleans up the directory, but it needs to live to the end of the test.
-    #[allow(dead_code)]
     pub state_dir: tempfile::TempDir,
 }
 
@@ -108,7 +108,7 @@ async fn create_instance(creds: Option<Creds>) -> anyhow::Result<Instance> {
         bridge_hostname: bridge_hostname.to_string(),
         bridge_port: bridge.server_port(),
         credentials: creds.server.clone(),
-        ..Default::default()
+        connection_pool_size: 32,
     };
     let server_config_file = tempdir.path().join("server.toml");
     std::fs::write(&server_config_file, toml::to_string_pretty(&server_config)?)?;
@@ -149,135 +149,93 @@ async fn create_instance(creds: Option<Creds>) -> anyhow::Result<Instance> {
     })
 }
 
-#[tokio::test]
-#[tracing_test::traced_test]
-async fn basic_bridge_config() -> anyhow::Result<()> {
-    let instance = create_instance(None).await?;
-    let client = instance.client;
+/// Benchmark the end-to-end connection speed.
+///
+/// The "who_am_i" command performs a single database lookup for the user and is done for all
+/// connections anyway. This benchmark gives a reasonable idea of the time it takes, given no
+/// meaningful latency, to establish a connection. Subtract the "command_roundtrip" benchmark
+/// to get the connection time minus the "who_am_i" command.
+fn connection(criterion: &mut Criterion) {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let instance = runtime
+        .block_on(async {
+            let instance = create_instance(None).await?;
+            Ok::<_, anyhow::Error>(instance)
+        })
+        .unwrap();
+    let config = instance.client.config();
 
-    for _ in 0..5 {
-        let username = client.who_am_i().await.unwrap();
-        assert_eq!(username, "sigul-client");
-    }
-
-    drop(client);
-    instance.server.halt().await?;
-    instance.bridge.halt().await?;
-
-    Ok(())
+    criterion.bench_function("connection", |b| {
+        b.iter(|| {
+            runtime.block_on(async {
+                let client = client::Client::new(config.clone()).unwrap();
+                client.who_am_i().await.unwrap();
+            })
+        })
+    });
 }
 
-// If the bridge presents a certificate signed by a different CA, the client should reject it.
-#[tokio::test]
-#[tracing_test::traced_test]
-async fn client_rejects_bridge_cert() -> anyhow::Result<()> {
-    let bridge_hostname = "localhost";
-    let server_hostname = "sigul-server";
-    let client_name = "sigul-client";
-    let instance = create_instance(None).await?;
+/// Benchmark the end-to-end connection speed with 32 concurrent connections.
+fn concurrent_connection(criterion: &mut Criterion) {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let instance = runtime
+        .block_on(async {
+            let instance = create_instance(None).await?;
+            Ok::<_, anyhow::Error>(instance)
+        })
+        .unwrap();
+    let config = instance.client.config();
 
-    let tempdir = tempfile::TempDir::new()?;
-    let creds = create_credentials(
-        tempdir.path(),
-        bridge_hostname,
-        server_hostname,
-        client_name,
-    )
-    .await?;
-    let client_config = client::Config {
-        server_hostname: server_hostname.to_string(),
-        bridge_hostname: bridge_hostname.to_string(),
-        bridge_port: instance.bridge.client_port(),
-        credentials: creds.client,
-    };
-    let client = client::Client::new(client_config)?;
-
-    let username = client.who_am_i().await;
-    match username {
-        Ok(_) => panic!("The request should not succeed"),
-        Err(ClientError::Connection(ConnectionError::Ssl(error))) => {
-            let error = error.ssl_error().unwrap().errors().first().unwrap();
-            assert_eq!(error.reason_code(), 134);
-            assert_eq!(error.reason(), Some("certificate verify failed"));
-            assert!(logs_contain("certificate verify failed"));
-        }
-        Err(other) => panic!("Incorrect error variant returned: {other:?}"),
-    }
-
-    drop(client);
-    instance.server.halt().await?;
-    instance.bridge.halt().await?;
-
-    Ok(())
+    criterion.bench_function("concurrent_connection", |b| {
+        b.iter(|| {
+            runtime.block_on(async {
+                let mut clients = tokio::task::JoinSet::new();
+                for _ in 0..32 {
+                    let client = client::Client::new(config.clone()).unwrap();
+                    clients.spawn(async move {
+                        client.who_am_i().await.unwrap();
+                    });
+                }
+                clients.join_all().await;
+            })
+        })
+    });
 }
 
-// If the client presents a certificate signed by a different CA, the bridge should reject it.
-#[tokio::test]
-#[tracing_test::traced_test]
-async fn bridge_rejects_client_cert() -> anyhow::Result<()> {
-    let bridge_hostname = "localhost";
-    let server_hostname = "sigul-server";
-    let client_name = "sigul-client";
-    let instance = create_instance(None).await?;
+/// Benchmark the time to send a request and receive a response, ignoring complex server-side work.
+///
+/// This starts a single connection and then repeatedly runs the "who_am_i" command to determine the
+/// serialized command throughput.
+fn command_roundtrip(criterion: &mut Criterion) {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let instance = runtime
+        .block_on(async {
+            let instance = create_instance(None).await?;
+            Ok::<_, anyhow::Error>(instance)
+        })
+        .unwrap();
 
-    let tempdir = tempfile::TempDir::new()?;
-    let mut creds = create_credentials(
-        tempdir.path(),
-        bridge_hostname,
-        server_hostname,
-        client_name,
-    )
-    .await?;
-    creds.client.ca_certificate = instance.creds.client.ca_certificate;
-    let client_config = client::Config {
-        server_hostname: server_hostname.to_string(),
-        bridge_hostname: bridge_hostname.to_string(),
-        bridge_port: instance.bridge.client_port(),
-        credentials: creds.client,
-    };
-    let client = client::Client::new(client_config)?;
-
-    let username = client.who_am_i().await;
-    match username {
-        Ok(_) => panic!("The request should not succeed"),
-        Err(ClientError::Connection(ConnectionError::Ssl(error))) => {
-            let error = error.ssl_error().unwrap().errors().first().unwrap();
-            assert_eq!(error.reason_code(), 1048);
-            assert_eq!(error.reason(), Some("tlsv1 alert unknown ca"));
-            assert!(logs_contain("Failed to accept new client connection"));
-            assert!(logs_contain("client_certificate:certificate verify failed"));
-        }
-        Err(other) => panic!("Incorrect error variant returned: {other:?}"),
-    }
-
-    drop(client);
-    instance.server.halt().await?;
-    instance.bridge.halt().await?;
-
-    Ok(())
+    criterion.bench_function("command_roundtrip", |b| {
+        b.iter(|| {
+            runtime.block_on(async {
+                instance.client.who_am_i().await.unwrap();
+            })
+        })
+    });
 }
 
-// If the client presents a certificate signed by a different CA, the bridge should reject it.
-#[tokio::test]
-#[tracing_test::traced_test]
-async fn bridge_rejects_client_cert_empty_common_name() -> anyhow::Result<()> {
-    let tempdir = tempfile::TempDir::new()?;
-    let creds = create_credentials(tempdir.path(), "localhost", "sigul-server", "").await?;
-    let instance = create_instance(Some(creds)).await?;
-    let client = instance.client;
-
-    let username = client.who_am_i().await;
-    match username {
-        Ok(name) => panic!("The request should not succeed, but server responded with {name}"),
-        Err(ClientError::Connection(ConnectionError::Protocol(error))) => {
-            assert_eq!(error, siguldry::v2::error::ProtocolError::MissingCommonName)
-        }
-        Err(other) => panic!("Incorrect error variant returned: {other:?}"),
-    }
-
-    drop(client);
-    instance.server.halt().await?;
-    instance.bridge.halt().await?;
-
-    Ok(())
-}
+criterion_group!(
+    name = benches;
+    config = Criterion::default().measurement_time(Duration::from_secs(30));
+    targets = connection, concurrent_connection, command_roundtrip
+);
+criterion_main!(benches);

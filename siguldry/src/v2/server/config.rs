@@ -25,6 +25,13 @@ pub struct Config {
     /// the server.
     pub bridge_port: u16,
 
+    /// The number of ready connections to maintain with the bridge. This decreases the latency of
+    /// responses when multiple client connections are established, at the expense of some idle
+    /// connections. Be aware that the bridge has its own limits on the allowable number of idle
+    /// server connections. If you use multiple servers with a single bridge, be sure that the
+    /// bridge allows enough idle connections to cover each server's pool size. The default is 32.
+    pub connection_pool_size: u32,
+
     /// The credentials to use when connecting to the bridge and when accepting client connections
     /// tunneled through the bridge. Note that the certificate must have both `clientAuth` and
     /// `serverAuth` in its extended key usage extension.
@@ -43,6 +50,7 @@ impl Default for Config {
             state_directory: PathBuf::from("/var/lib/siguldry/"),
             bridge_hostname: "bridge.example.com".to_string(),
             bridge_port: 44333,
+            connection_pool_size: 32,
             credentials: Credentials {
                 private_key: PathBuf::from("sigul.server.private_key.pem"),
                 certificate: PathBuf::from("sigul.server.certificate.pem"),

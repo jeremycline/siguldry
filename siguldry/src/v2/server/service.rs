@@ -7,13 +7,16 @@ use anyhow::Context;
 use bytes::{BufMut, BytesMut};
 use openssl::ssl::{Ssl, SslAcceptor, SslConnector};
 use sqlx::{Pool, Sqlite};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    task::JoinSet,
+};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{instrument, Instrument};
 use zerocopy::{IntoBytes, TryFromBytes};
 
 use crate::v2::{
-    error::ClientError as Error,
+    error::ConnectionError,
     nestls::Nestls,
     protocol::{self, json::Request, Role},
     server::{config::Config, db, handlers},
@@ -28,7 +31,7 @@ pub struct Server {
 }
 
 pub struct Listener {
-    task: tokio::task::JoinHandle<()>,
+    task: tokio::task::JoinHandle<anyhow::Result<()>>,
     halt_token: CancellationToken,
 }
 
@@ -39,7 +42,7 @@ impl Listener {
     /// this call in a timeout if they don't have an arbitrarily long time to wait.
     pub async fn halt(self) -> anyhow::Result<()> {
         self.halt_token.cancel();
-        self.task.await?;
+        self.task.await??;
 
         Ok(())
     }
@@ -51,7 +54,7 @@ impl Listener {
     }
 
     pub async fn wait_to_finish(self) -> anyhow::Result<()> {
-        self.task.await?;
+        self.task.await??;
         Ok(())
     }
 }
@@ -84,20 +87,28 @@ impl Server {
         let server_halt_token = halt_token.clone();
         let task = tokio::spawn(async move {
             let request_tracker = TaskTracker::new();
+            let mut connection_pool = JoinSet::new();
+            for _ in 0..self.config.connection_pool_size {
+                self.accept(&mut connection_pool)?;
+            }
 
             'accept: loop {
                 tokio::select! {
                     _ = server_halt_token.cancelled() => {
                         tracing::info!("Shutdown requested, no new requests will be accepted");
+                        connection_pool.abort_all();
                         break 'accept;
                     },
-                    conn = self.accept() => {
+                    conn = connection_pool.join_next() => {
                         match conn {
-                            Ok(conn) => {
+                            Some(Ok(Ok(conn))) => {
                                 tracing::info!("New request accepted");
+                                self.accept(&mut connection_pool)?;
                                 request_tracker.spawn(handle(self.db_pool.clone(), conn).instrument(tracing::Span::current()));
                             },
-                            Err(error) => tracing::error!(?error, "Failed to accept incoming client connection"),
+                            Some(Ok(Err(error))) => tracing::error!(?error, "Failed to accept incoming client connection"),
+                            Some(Err(error)) => tracing::error!(?error, "Connection pool failed to yield a connection"),
+                            None => panic!("huh"),
                         }
                     },
                 }
@@ -105,28 +116,31 @@ impl Server {
 
             request_tracker.close();
             request_tracker.wait().await;
+
+            Ok::<_, anyhow::Error>(())
         });
 
         Listener { task, halt_token }
     }
 
-    async fn accept(&self) -> Result<Nestls, Error> {
-        let conn = Nestls::builder(
+    fn accept(
+        &self,
+        connection_pool: &mut JoinSet<Result<Nestls, ConnectionError>>,
+    ) -> anyhow::Result<()> {
+        let bridge_addr = format!(
+            "{}:{}",
+            &self.config.bridge_hostname, self.config.bridge_port
+        );
+        let ssl = Ssl::new(self.server_tls_config.context())?;
+        let builder = Nestls::builder(
             self.client_tls_config
                 .configure()?
                 .into_ssl(&self.config.bridge_hostname)?,
             Role::Server,
-        )
-        .accept(
-            format!(
-                "{}:{}",
-                &self.config.bridge_hostname, self.config.bridge_port
-            ),
-            Ssl::new(self.server_tls_config.context())?,
-        )
-        .await?;
+        );
+        connection_pool.spawn(builder.accept(bridge_addr, ssl));
 
-        Ok(conn)
+        Ok(())
     }
 }
 

@@ -108,6 +108,9 @@ pub enum ClientError {
     #[error("The server responded with an error: {0}")]
     Server(#[from] ServerError),
 
+    #[error("Failed to serialize a request or response to JSON: {0}")]
+    Serialization(#[from] serde_json::Error),
+
     /// Generic error that indicates a fatal error, likely due to a bug in the client.
     ///
     /// Retrying the operation will not help, and this should be reported as bug.

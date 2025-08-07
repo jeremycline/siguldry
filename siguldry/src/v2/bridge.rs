@@ -122,8 +122,8 @@ async fn inner_listen(
     let tls_config = config.credentials.ssl_acceptor()?;
     let request_tracker = TaskTracker::new();
 
-    let (server_conns_tx, mut server_conns_rx) = mpsc::channel::<SslStream<TcpStream>>(32);
-    let (client_conns_tx, mut client_conns_rx) = mpsc::channel::<SslStream<TcpStream>>(32);
+    let (server_conns_tx, mut server_conns_rx) = mpsc::channel::<SslStream<TcpStream>>(128);
+    let (client_conns_tx, mut client_conns_rx) = mpsc::channel::<SslStream<TcpStream>>(128);
 
     let server_acceptor_halt = halt_token.clone();
     let server_tls_config = tls_config.clone();
