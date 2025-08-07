@@ -22,6 +22,10 @@ use crate::v2::{
     server::{config::Config, db, handlers},
 };
 
+// These should both be configurable and 100MB is probably too big as a default.
+const MAX_JSON_SIZE: usize = 1024 * 32;
+const MAX_BINARY_SIZE: usize = 1024 * 1024 * 100;
+
 /// A sigul server.
 pub struct Server {
     config: Config,
@@ -108,13 +112,20 @@ impl Server {
                             },
                             Some(Ok(Err(error))) => tracing::error!(?error, "Failed to accept incoming client connection"),
                             Some(Err(error)) => tracing::error!(?error, "Connection pool failed to yield a connection"),
-                            None => panic!("huh"),
+                            None => {
+                                // This shouldn't really be possible since we add a new connection for each accepted one
+                                tracing::error!("Connection pool exhausted unexpectedly; report this as a bug. Attempting to continue...");
+                                while connection_pool.len() < self.config.connection_pool_size {
+                                    self.accept(&mut connection_pool)?;
+                                }
+                            },
                         }
                     },
                 }
             }
 
             request_tracker.close();
+            connection_pool.shutdown().await;
             request_tracker.wait().await;
 
             Ok::<_, anyhow::Error>(())
@@ -174,11 +185,22 @@ async fn handle(db: Pool<Sqlite>, mut conn: Nestls) -> Result<(), anyhow::Error>
             .get()
             .try_into()
             .context("frame size must fit in usize")?;
+        // TODO: configurable size limits
+        if json_size > MAX_JSON_SIZE {
+            return Err(anyhow::anyhow!(
+                "JSON payload larger than {MAX_JSON_SIZE} bytes"
+            ));
+        }
         let binary_size: usize = frame
             .binary_size
             .get()
             .try_into()
             .context("frame size must fit in usize")?;
+        if binary_size > MAX_BINARY_SIZE {
+            return Err(anyhow::anyhow!(
+                "BINARY payload larger than {MAX_BINARY_SIZE} bytes"
+            ));
+        }
         let frame_size = json_size + binary_size;
         let mut request_buffer = BytesMut::with_capacity(frame_size).limit(frame_size);
         while request_buffer.remaining_mut() != 0 {

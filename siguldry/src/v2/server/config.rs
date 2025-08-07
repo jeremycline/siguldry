@@ -30,7 +30,7 @@ pub struct Config {
     /// connections. Be aware that the bridge has its own limits on the allowable number of idle
     /// server connections. If you use multiple servers with a single bridge, be sure that the
     /// bridge allows enough idle connections to cover each server's pool size. The default is 32.
-    pub connection_pool_size: u32,
+    pub connection_pool_size: usize,
 
     /// The credentials to use when connecting to the bridge and when accepting client connections
     /// tunneled through the bridge. Note that the certificate must have both `clientAuth` and
