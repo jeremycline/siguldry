@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{bail, Context};
+use anyhow::Context;
 use openssl::{
     error::ErrorStack,
     ssl::{SslAcceptor, SslConnector, SslFiletype, SslMethod, SslVerifyMode, SslVersion},
@@ -115,48 +115,6 @@ impl Credentials {
                     self.ca_certificate.display()
                 ));
             }
-        }
-
-        Ok(())
-    }
-
-    /// Validate all the referenced credentials exist.
-    ///
-    /// This should be called _after_ [`Credentials::with_credentials_dir`].
-    pub fn validate(&self) -> anyhow::Result<()> {
-        if self.private_key.is_relative() {
-            bail!(
-                "The private_key path, {}, must be an absolute path",
-                self.private_key.display()
-            )
-        }
-        if self.certificate.is_relative() {
-            bail!(
-                "The certificate path, {}, must be an absolute path",
-                self.certificate.display()
-            )
-        }
-        if self.ca_certificate.is_relative() {
-            bail!(
-                "The ca_certificate path, {}, must be an absolute path",
-                self.ca_certificate.display()
-            )
-        }
-
-        if !self.private_key.is_file() {
-            bail!(
-                "The path used for private_key, {}, is not a file, or is not readable to this user",
-                self.private_key.display()
-            )
-        }
-        if !self.certificate.is_file() {
-            bail!(
-                "The path used for certificate, {}, is not a file, or is not readable to this user",
-                self.certificate.display()
-            )
-        }
-        if !self.ca_certificate.is_file() {
-            bail!("The path used for ca_certificate, {}, is not a file, or is not readable to this user", self.ca_certificate.display())
         }
 
         Ok(())

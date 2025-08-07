@@ -173,8 +173,8 @@ fn connection(criterion: &mut Criterion) {
             runtime.block_on(async {
                 let client = client::Client::new(config.clone()).unwrap();
                 client.who_am_i().await.unwrap();
-            })
-        })
+            });
+        });
     });
 }
 
@@ -203,8 +203,8 @@ fn concurrent_connection(criterion: &mut Criterion) {
                     });
                 }
                 clients.join_all().await;
-            })
-        })
+            });
+        });
     });
 }
 
@@ -228,8 +228,8 @@ fn command_roundtrip(criterion: &mut Criterion) {
         b.iter(|| {
             runtime.block_on(async {
                 instance.client.who_am_i().await.unwrap();
-            })
-        })
+            });
+        });
     });
 }
 

@@ -270,7 +270,7 @@ async fn bridge_rejects_client_cert_empty_common_name() -> anyhow::Result<()> {
     match username {
         Ok(name) => panic!("The request should not succeed, but server responded with {name}"),
         Err(ClientError::Connection(ConnectionError::Protocol(error))) => {
-            assert_eq!(error, siguldry::v2::error::ProtocolError::MissingCommonName)
+            assert_eq!(error, siguldry::v2::error::ProtocolError::MissingCommonName);
         }
         Err(other) => panic!("Incorrect error variant returned: {other:?}"),
     }

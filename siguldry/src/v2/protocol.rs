@@ -405,6 +405,7 @@ impl From<json::Response> for Response {
 /// to process additional requests on the connection.
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ServerError {
     #[error("The user '{0}' does not exist in the database")]
     NoSuchUser(String),
