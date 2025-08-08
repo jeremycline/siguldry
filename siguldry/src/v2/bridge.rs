@@ -67,13 +67,13 @@ async fn accept_conn(
     tcp_listener: &TcpListener,
     ssl: Ssl,
     role: Role,
-) -> anyhow::Result<SslStream<TcpStream>> {
+) -> anyhow::Result<(SslStream<TcpStream>, SocketAddr)> {
     let (tcp_stream, client_addr) = tcp_listener.accept().await?;
-    tracing::info!(listener=?tcp_listener.local_addr()?, ?client_addr, "New TCP connection established");
+    tracing::debug!(listener=?tcp_listener.local_addr()?, ?client_addr, "New TCP connection established");
 
     let mut stream = tokio_openssl::SslStream::new(ssl, tcp_stream)?;
     Pin::new(&mut stream).accept().await?;
-    tracing::info!(listener=?tcp_listener.local_addr()?, ?client_addr, "TLS session established");
+    tracing::debug!(listener=?tcp_listener.local_addr()?, ?client_addr, "TLS session established");
 
     let mut header_buf = [0_u8; std::mem::size_of::<protocol::ProtocolHeader>()];
     stream.read_exact(&mut header_buf).await?;
@@ -110,7 +110,7 @@ async fn accept_conn(
     };
     peer_name?;
 
-    Ok(stream)
+    Ok((stream, client_addr))
 }
 
 async fn inner_listen(
@@ -122,8 +122,10 @@ async fn inner_listen(
     let tls_config = config.credentials.ssl_acceptor()?;
     let request_tracker = TaskTracker::new();
 
-    let (server_conns_tx, mut server_conns_rx) = mpsc::channel::<SslStream<TcpStream>>(128);
-    let (client_conns_tx, mut client_conns_rx) = mpsc::channel::<SslStream<TcpStream>>(128);
+    let (server_conns_tx, mut server_conns_rx) =
+        mpsc::channel::<(SslStream<TcpStream>, SocketAddr)>(128);
+    let (client_conns_tx, mut client_conns_rx) =
+        mpsc::channel::<(SslStream<TcpStream>, SocketAddr)>(128);
 
     let server_acceptor_halt = halt_token.clone();
     let server_tls_config = tls_config.clone();
@@ -272,17 +274,28 @@ pub async fn listen(config: Config) -> anyhow::Result<Listener> {
     })
 }
 
-#[instrument(skip_all, ret, err, fields(session_id = Uuid::from_u128(ack.session_id.get()).to_string()))]
+#[instrument(
+    skip_all,
+    ret,
+    err,
+    fields(
+        client_addr = ?client.1,
+        server_addr = ?server.1,
+        session_id = Uuid::from_u128(ack.session_id.get()).to_string()
+    )
+)]
 async fn bridge(
     ack: ProtocolAck,
-    mut client_conn: SslStream<TcpStream>,
-    mut server_conn: SslStream<TcpStream>,
+    client: (SslStream<TcpStream>, SocketAddr),
+    server: (SslStream<TcpStream>, SocketAddr),
 ) -> anyhow::Result<()> {
+    let (mut client_conn, _) = client;
+    let (mut server_conn, _) = server;
     tokio::try_join!(
         client_conn.write_all(ack.as_bytes()),
         server_conn.write_all(ack.as_bytes())
     )?;
-    tracing::trace!("Client and server protocol acknowledgements sent");
+    tracing::info!("Bridging new connection");
 
     let size = 1024 * 64;
     let (client_sent_bytes, server_sent_bytes) =
