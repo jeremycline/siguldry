@@ -3,7 +3,6 @@
 
 //! The Siguldry client.
 use std::collections::VecDeque;
-use std::io;
 use std::path::PathBuf;
 use std::{sync::Arc, time::Duration};
 
@@ -92,14 +91,15 @@ impl Client {
         &self.config
     }
 
+    // Send a request to the server, retrying if the connection fails.
     async fn reconnecting_send(&self, request: Request) -> Result<protocol::Response, ClientError> {
-        let response = loop {
+        loop {
             let mut service_lock = self.inner.lock().await;
-            if let Some(mut service) = service_lock.take() {
+            let response = if let Some(mut service) = service_lock.take() {
                 match service.send(request.clone()).await {
                     Ok(response) => {
                         *service_lock = Some(service);
-                        break Ok(response);
+                        Some(response)
                     }
                     Err(ClientError::Connection(ConnectionError::Io(error))) => {
                         tracing::info!(
@@ -107,6 +107,7 @@ impl Client {
                             "An I/O error occurred while connecting; retrying..."
                         );
                         tokio::time::sleep(Duration::from_secs(3)).await;
+                        None
                     }
                     Err(err) => break Err(err),
                 }
@@ -128,14 +129,23 @@ impl Client {
                     )
                     .await?;
                 *service_lock = Some(InnerClient::new(conn));
-            }
-        }?;
+                None
+            };
 
-        // A RecvError happens if the sending/receiving task fails due to a network error.
-        // TODO consider piping the error back before the task exits.
-        response
-            .await
-            .map_err(|error| ClientError::Connection(ConnectionError::Io(io::Error::other(error))))
+            // Don't hold the lock while we wait for a server response
+            drop(service_lock);
+            if let Some(response) = response {
+                if let Ok(response) = response.await {
+                    break Ok(response);
+                } else {
+                    // This case is when the task owning the connection halts before it sends us
+                    // the server response. We'll need to start a new connection.
+                    tracing::warn!("Connection failed before server responded; retrying...");
+                    self.inner.lock().await.take();
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                }
+            }
+        }
     }
 
     /// Attempt to authenticate against the server.
@@ -288,7 +298,6 @@ impl InnerClient {
                     let respond_to = pending_responses
                         .pop_front()
                         .ok_or_else(|| anyhow::anyhow!("Unexpected response received!"))?;
-                    // TODO include binary
                     let json_response: OuterResponse = serde_json::from_slice(json)?;
                     tracing::debug!(
                         request_id = json_response.request_id,
