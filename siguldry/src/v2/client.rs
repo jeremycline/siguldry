@@ -92,7 +92,7 @@ impl Client {
         &self.config
     }
 
-    async fn reconnecting_send(&self, request: Request) -> Result<Response, ClientError> {
+    async fn reconnecting_send(&self, request: Request) -> Result<protocol::Response, ClientError> {
         let response = loop {
             let mut service_lock = self.inner.lock().await;
             if let Some(mut service) = service_lock.take() {
@@ -148,10 +148,10 @@ impl Client {
             binary: None,
         };
         let response = self.reconnecting_send(request).await?;
-        match response {
+        match response.json {
             Response::WhoAmI { user } => Ok(user),
             Response::Error { reason } => Err(reason.into()),
-            _other => panic!("don't panic here"),
+            _other => Err(anyhow::anyhow!("Unexpected response from server").into()),
         }
     }
 
@@ -162,10 +162,10 @@ impl Client {
         };
 
         let response = self.reconnecting_send(request).await?;
-        match response {
+        match response.json {
             Response::ListUsers { users } => Ok(users),
             Response::Error { reason } => Err(reason.into()),
-            _other => panic!("don't panic here"),
+            _other => Err(anyhow::anyhow!("Unexpected response from server").into()),
         }
     }
 }
@@ -173,7 +173,7 @@ impl Client {
 // This structure maps to a single connection to the server.
 #[derive(Clone, Debug)]
 struct InnerClient {
-    request_tx: mpsc::Sender<(Bytes, oneshot::Sender<Response>)>,
+    request_tx: mpsc::Sender<(Bytes, oneshot::Sender<protocol::Response>)>,
     session_id: Uuid,
     request_id: u64,
 }
@@ -193,7 +193,7 @@ impl InnerClient {
     #[instrument(level = "debug", skip_all, err)]
     async fn request_handler(
         mut connection: Nestls,
-        mut request_rx: mpsc::Receiver<(Bytes, oneshot::Sender<Response>)>,
+        mut request_rx: mpsc::Receiver<(Bytes, oneshot::Sender<protocol::Response>)>,
     ) -> anyhow::Result<()> {
         // Unfortunately, currently the stream provided by OpenSSL doesn't allow splitting into
         // read/write halves, so the implementation to read/write concurrently is trickier.
@@ -258,7 +258,6 @@ impl InnerClient {
             match &incoming_json {
                 None if json_size > incoming_buffer.len() => {
                     tracing::trace!("Waiting for more data to complete the JSON response");
-                    continue;
                 }
                 None => {
                     let json = incoming_buffer.split_to(json_size).freeze();
@@ -269,33 +268,37 @@ impl InnerClient {
                         let respond_to = pending_responses
                             .pop_front()
                             .ok_or_else(|| anyhow::anyhow!("Unexpected response received!"))?;
-                        // TODO include binary
-                        let binary = incoming_buffer.split_to(binary_size).freeze();
                         let json_response: OuterResponse = serde_json::from_slice(&json)?;
                         tracing::debug!(
                             request_id = json_response.request_id,
                             "Full server response received"
                         );
-                        let _ = respond_to.send(json_response.response);
+                        let mut response: protocol::Response = json_response.response.into();
+                        if binary_size > 0 {
+                            response.binary = Some(incoming_buffer.split_to(binary_size).freeze());
+                        }
+                        let _ = respond_to.send(response);
                         incoming_frame = None;
                     }
                 }
                 Some(_) if binary_size > incoming_buffer.len() => {
                     tracing::trace!("Waiting for more data to complete the binary response");
-                    continue;
                 }
                 Some(json) => {
                     let respond_to = pending_responses
                         .pop_front()
                         .ok_or_else(|| anyhow::anyhow!("Unexpected response received!"))?;
                     // TODO include binary
-                    let binary = incoming_buffer.split_to(binary_size).freeze();
                     let json_response: OuterResponse = serde_json::from_slice(json)?;
                     tracing::debug!(
                         request_id = json_response.request_id,
                         "Full server response received"
                     );
-                    let _ = respond_to.send(json_response.response);
+                    let mut response: protocol::Response = json_response.response.into();
+                    if binary_size > 0 {
+                        response.binary = Some(incoming_buffer.split_to(binary_size).freeze());
+                    }
+                    let _ = respond_to.send(response);
                     incoming_json = None;
                     incoming_frame = None;
                 }
@@ -306,7 +309,10 @@ impl InnerClient {
     }
 
     #[instrument(skip_all, fields(session_id = self.session_id.to_string()))]
-    async fn send(&mut self, request: Request) -> Result<Receiver<Response>, ClientError> {
+    async fn send(
+        &mut self,
+        request: Request,
+    ) -> Result<Receiver<protocol::Response>, ClientError> {
         let json = OuterRequest {
             session_id: self.session_id,
             request_id: self.request_id,
