@@ -14,9 +14,9 @@ use std::{
 
 use anyhow::bail;
 use assert_cmd::cargo::CommandCargoExt;
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use siguldry::v2::{bridge, client, config::Credentials, server};
-use tokio::process::Command;
+use tokio::{process::Command, task::JoinSet};
 use tracing::Instrument;
 
 #[derive(Clone)]
@@ -233,9 +233,50 @@ fn command_roundtrip(criterion: &mut Criterion) {
     });
 }
 
+fn bench_command_throughput(c: &mut Criterion) {
+    let mut group = c.benchmark_group("command_throughput");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let instance = runtime
+        .block_on(async {
+            let instance = create_instance(None).await?;
+            Ok::<_, anyhow::Error>(instance)
+        })
+        .unwrap();
+
+    for size in [64, 128, 512_usize].iter() {
+        group.throughput(criterion::Throughput::Elements(*size as u64));
+
+        group.bench_with_input(BenchmarkId::new("whoami", *size), size, |b, size| {
+            b.iter(|| {
+                runtime.block_on(async {
+                    let mut joinset = JoinSet::new();
+                    for _ in 0..*size {
+                        let client = instance.client.clone();
+                        joinset.spawn(async move { client.who_am_i().await });
+                    }
+                    _ = joinset
+                        .join_all()
+                        .await
+                        .into_iter()
+                        .collect::<Result<Vec<String>, _>>()
+                        .unwrap();
+                });
+            });
+        });
+    }
+}
+
 criterion_group!(
-    name = benches;
+    name = base_benches;
     config = Criterion::default().measurement_time(Duration::from_secs(30));
     targets = connection, concurrent_connection, command_roundtrip
 );
-criterion_main!(benches);
+criterion_group!(
+    name = command_benches;
+    config = Criterion::default().measurement_time(Duration::from_secs(30));
+    targets = bench_command_throughput
+);
+criterion_main!(base_benches, command_benches);
