@@ -2,12 +2,15 @@
 // Copyright (c) Microsoft Corporation.
 
 //! The Siguldry client.
+use std::collections::VecDeque;
+use std::io;
 use std::path::PathBuf;
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Context;
 use bytes::{BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot::Receiver;
 use tokio::sync::Mutex;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -90,7 +93,7 @@ impl Client {
     }
 
     async fn reconnecting_send(&self, request: Request) -> Result<Response, ClientError> {
-        loop {
+        let response = loop {
             let mut service_lock = self.inner.lock().await;
             if let Some(mut service) = service_lock.take() {
                 match service.send(request.clone()).await {
@@ -126,7 +129,13 @@ impl Client {
                     .await?;
                 *service_lock = Some(InnerClient::new(conn));
             }
-        }
+        }?;
+
+        // A RecvError happens if the sending/receiving task fails due to a network error.
+        // TODO consider piping the error back before the task exits.
+        response
+            .await
+            .map_err(|error| ClientError::Connection(ConnectionError::Io(io::Error::other(error))))
     }
 
     /// Attempt to authenticate against the server.
@@ -164,7 +173,7 @@ impl Client {
 // This structure maps to a single connection to the server.
 #[derive(Clone, Debug)]
 struct InnerClient {
-    request_tx: mpsc::Sender<(Frame, Bytes, oneshot::Sender<Response>)>,
+    request_tx: mpsc::Sender<(Bytes, oneshot::Sender<Response>)>,
     session_id: Uuid,
     request_id: u64,
 }
@@ -184,42 +193,120 @@ impl InnerClient {
     #[instrument(level = "debug", skip_all, err)]
     async fn request_handler(
         mut connection: Nestls,
-        mut request_rx: mpsc::Receiver<(Frame, Bytes, oneshot::Sender<Response>)>,
+        mut request_rx: mpsc::Receiver<(Bytes, oneshot::Sender<Response>)>,
     ) -> anyhow::Result<()> {
-        // TODO split in read/write half and select
-        while let Some((request_frame, request, respond_to)) = request_rx.recv().await {
-            tracing::info!("Request received");
-            connection.write_all(request_frame.as_bytes()).await?;
-            connection.write_all(request.as_bytes()).await?;
+        // Unfortunately, currently the stream provided by OpenSSL doesn't allow splitting into
+        // read/write halves, so the implementation to read/write concurrently is trickier.
 
-            let mut frame_buffer = [0_u8; std::mem::size_of::<protocol::Frame>()];
-            connection.read_exact(&mut frame_buffer).await?;
-            let frame = protocol::Frame::try_ref_from_bytes(&frame_buffer)
-                .map_err(|e| anyhow::anyhow!(format!("{e:?}")))?;
-            tracing::info!(?frame, "New frame received");
+        // Buffers incoming reads before they're parsed out into frames
+        let mut incoming_buffer = BytesMut::new();
 
-            let json_size: usize = frame.json_size.get().try_into().unwrap();
-            let binary_size: usize = frame.binary_size.get().try_into().unwrap();
-            let frame_size = json_size + binary_size;
-            let mut response_buffer = BytesMut::with_capacity(frame_size).limit(frame_size);
-            while response_buffer.remaining_mut() != 0 {
-                connection.read_buf(&mut response_buffer).await?;
+        // The bytes backing the incoming frame
+        let mut incoming_frame_bytes;
+        let mut incoming_frame: Option<&Frame> = None;
+
+        let mut incoming_json: Option<Bytes> = None;
+        let mut pending_responses = VecDeque::new();
+
+        // TODO pop all the respond_to's  and send an error if needed
+        let result = loop {
+            tokio::select! {
+                request = request_rx.recv() => {
+                    if let Some((request, respond_to)) = request {
+                        tracing::debug!("Request received");
+                        connection.write_all(request.as_bytes()).await?;
+                        pending_responses.push_back(respond_to);
+                        continue;
+                    } else {
+                        tracing::debug!("Sending empty frame to signal the end of the connection.");
+                        connection.write_all(Frame::empty().as_bytes()).await?;
+                        break Ok::<_, anyhow::Error>(());
+                    }
+                }
+                bytes_read = connection.read_buf(&mut incoming_buffer) => {
+                    let bytes_read = bytes_read?;
+                    tracing::trace!(bytes_read, "Handling incoming response data");
+                }
             }
 
-            let mut response_bytes = response_buffer.into_inner().freeze();
-            let _binary_bytes = response_bytes.split_off(json_size);
-            let json_response: OuterResponse = serde_json::from_slice(&response_bytes).unwrap();
-            respond_to.send(json_response.response).unwrap();
-        }
+            let current_frame = match incoming_frame {
+                // Need more bytes to do anything
+                None if std::mem::size_of::<Frame>() > incoming_buffer.len() => {
+                    tracing::trace!("Waiting for more data to complete the response frame");
+                    continue;
+                }
+                None => {
+                    incoming_frame_bytes = incoming_buffer
+                        .split_to(std::mem::size_of::<Frame>())
+                        .freeze();
+                    let frame = Frame::try_ref_from_bytes(&incoming_frame_bytes)
+                        .map_err(|e| anyhow::anyhow!(format!("{e:?}")))?;
+                    incoming_frame = Some(frame);
+                    tracing::debug!(
+                        ?frame,
+                        pending_responses = pending_responses.len(),
+                        "Client received response frame from server"
+                    );
+                    frame
+                }
+                Some(frame) => frame,
+            };
 
-        tracing::debug!("Sending empty frame to signal the end of the connection.");
-        connection.write_all(Frame::empty().as_bytes()).await?;
+            let json_size: usize = current_frame.json_size.get().try_into()?;
+            let binary_size: usize = current_frame.binary_size.get().try_into()?;
 
-        Ok(())
+            match &incoming_json {
+                None if json_size > incoming_buffer.len() => {
+                    tracing::trace!("Waiting for more data to complete the JSON response");
+                    continue;
+                }
+                None => {
+                    let json = incoming_buffer.split_to(json_size).freeze();
+                    if binary_size > incoming_buffer.len() {
+                        tracing::debug!("Received JSON response; awaiting binary payload");
+                        incoming_json = Some(json);
+                    } else {
+                        let respond_to = pending_responses
+                            .pop_front()
+                            .ok_or_else(|| anyhow::anyhow!("Unexpected response received!"))?;
+                        // TODO include binary
+                        let binary = incoming_buffer.split_to(binary_size).freeze();
+                        let json_response: OuterResponse = serde_json::from_slice(&json)?;
+                        tracing::debug!(
+                            request_id = json_response.request_id,
+                            "Full server response received"
+                        );
+                        let _ = respond_to.send(json_response.response);
+                        incoming_frame = None;
+                    }
+                }
+                Some(_) if binary_size > incoming_buffer.len() => {
+                    tracing::trace!("Waiting for more data to complete the binary response");
+                    continue;
+                }
+                Some(json) => {
+                    let respond_to = pending_responses
+                        .pop_front()
+                        .ok_or_else(|| anyhow::anyhow!("Unexpected response received!"))?;
+                    // TODO include binary
+                    let binary = incoming_buffer.split_to(binary_size).freeze();
+                    let json_response: OuterResponse = serde_json::from_slice(json)?;
+                    tracing::debug!(
+                        request_id = json_response.request_id,
+                        "Full server response received"
+                    );
+                    let _ = respond_to.send(json_response.response);
+                    incoming_json = None;
+                    incoming_frame = None;
+                }
+            };
+        };
+
+        result
     }
 
     #[instrument(skip_all, fields(session_id = self.session_id.to_string()))]
-    async fn send(&mut self, request: Request) -> Result<Response, ClientError> {
+    async fn send(&mut self, request: Request) -> Result<Receiver<Response>, ClientError> {
         let json = OuterRequest {
             session_id: self.session_id,
             request_id: self.request_id,
@@ -229,29 +316,30 @@ impl InnerClient {
         let json = serde_json::to_string(&json)?;
         let json = Bytes::from_owner(json);
         let binary = request.binary.unwrap_or_default();
-        let request_frame = protocol::Frame::new(
-            json.as_bytes()
-                .len()
-                .try_into()
-                .context("JSON payload larger than a u64")?,
-            binary
-                .as_bytes()
-                .len()
-                .try_into()
-                .context("Binary payload larger than a u64")?,
-        );
-        let mut request = BytesMut::from(json);
-        request.put(binary);
-        let request = request.freeze();
+        let json_size: u64 = json
+            .as_bytes()
+            .len()
+            .try_into()
+            .context("JSON payload larger than a u64")?;
+        let binary_size: u64 = binary
+            .as_bytes()
+            .len()
+            .try_into()
+            .context("Binary payload larger than a u64")?;
+        let request_frame = protocol::Frame::new(json_size, binary_size);
+        let mut payload =
+            BytesMut::with_capacity(request_frame.as_bytes().len() + json.len() + binary.len());
+        payload.put(request_frame.as_bytes());
+        payload.put(json);
+        payload.put(binary);
+        let payload = payload.freeze();
 
         let (response_tx, response_rx) = oneshot::channel();
-        let request_tx = self.request_tx.clone();
 
-        request_tx
-            .send((request_frame, request, response_tx))
+        self.request_tx
+            .send((payload, response_tx))
             .await
             .context("Couldn't send request to actor")?;
-        let response = response_rx.await.context("Actor channel didn't respond")?;
-        Ok(response)
+        Ok(response_rx)
     }
 }
