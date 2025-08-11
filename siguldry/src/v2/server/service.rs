@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) Microsoft Corporation.
 
-//! A sigul server.
+//! The Siguldry server.
 
 use anyhow::Context;
 use bytes::{BufMut, BytesMut};
@@ -157,10 +157,6 @@ impl Server {
 
 #[instrument(skip_all, fields(session_id = conn.session_id().to_string(), client = conn.peer_common_name()))]
 async fn handle(db: Pool<Sqlite>, mut conn: Nestls) -> Result<(), anyhow::Error> {
-    // Read request frame
-    // parse request
-    // dispatch to handler
-    // TODO test out this flow with tower
     let user = conn
         .peer_common_name()
         .ok_or(protocol::Error::MissingCommonName)?;

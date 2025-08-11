@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) Microsoft Corporation.
 
+//! The Siguldry bridge.
+
 use std::{fmt::Debug, net::SocketAddr, pin::Pin, str::FromStr};
 
 use anyhow::anyhow;
@@ -194,7 +196,12 @@ async fn inner_listen(
         }
     }
 
-    // TODO: probably drain and cancel any pendign connections in the channels.
+    while let Some((_conn, remote_addr)) = client_conns_rx.recv().await {
+        tracing::trace!(?remote_addr, "Cancelling pending client connection");
+    }
+    while let Some((_conn, remote_addr)) = server_conns_rx.recv().await {
+        tracing::trace!(?remote_addr, "Cancelling pending server connection");
+    }
 
     request_tracker.close();
     request_tracker.wait().await;

@@ -136,9 +136,8 @@ impl AsyncWrite for Nestls {
 
 // TODO Things the connection should have config for:
 //
-// Optional timeout for connection to bridge
+// Optional timeout for connection to bridge vs the nested TLS session
 // The protocol version being used
-// Maybe handle more of the SSL config?
 
 impl NestlsBuilder {
     /// Build a configuration for a [`Nestls`] connection.

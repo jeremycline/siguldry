@@ -137,6 +137,7 @@ async fn create_instance(creds: Option<Creds>) -> anyhow::Result<Instance> {
         bridge_hostname: bridge_hostname.to_string(),
         bridge_port: bridge.client_port(),
         credentials: creds.client.clone(),
+        ..Default::default()
     };
     let client = client::Client::new(client_config)?;
 
@@ -189,6 +190,7 @@ async fn client_rejects_bridge_cert() -> anyhow::Result<()> {
         bridge_hostname: bridge_hostname.to_string(),
         bridge_port: instance.bridge.client_port(),
         credentials: creds.client,
+        ..Default::default()
     };
     let client = client::Client::new(client_config)?;
 
@@ -234,6 +236,7 @@ async fn bridge_rejects_client_cert() -> anyhow::Result<()> {
         bridge_hostname: bridge_hostname.to_string(),
         bridge_port: instance.bridge.client_port(),
         credentials: creds.client,
+        ..Default::default()
     };
     let client = client::Client::new(client_config)?;
 
