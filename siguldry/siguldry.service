@@ -1,0 +1,62 @@
+[Unit]
+Description=The Siguldry server
+
+[Service]
+Type=simple
+# Refer to https://docs.rs/tracing-subscriber/0.3.19/tracing_subscriber/filter/struct.EnvFilter.html#directives
+# for more fine-grain logging output.
+Environment=SIGULDRY_SERVER_LOG=info
+Environment=SIGULDRY_SERVER_CONFIG=/etc/siguldry/server.toml
+ExecStart=/usr/bin/siguldry-server listen
+User=siguldry
+Group=siguldry
+Restart=on-failure
+
+UMask=017
+
+RuntimeDirectory=siguldry
+RuntimeDirectoryMode=750
+ConfigurationDirectory=siguldry
+ConfigurationDirectoryMode=750
+
+# Opt-in to most systemd sandboxing
+CapabilityBoundingSet=
+LockPersonality=true
+MemoryDenyWriteExecute=true
+NoNewPrivileges=true
+PrivateDevices=true
+# Credentials may require the TPM to decrypt.
+#
+# Refer to https://github.com/systemd/systemd/issues/35959 as this directive
+# might be removable in the future.
+#
+#DeviceAllow=/dev/tpmrm0
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectProc=invisible
+ProtectSystem=strict
+RemoveIPC=true
+# The service offers a Unix socket and communicates with the Sigul bridge over the network.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+SystemCallErrorNumber=EPERM
+# This can likely be restricted further
+SystemCallFilter=@system-service
+
+# The service needs to authenticate with the bridge via TLS.
+#
+# The credentials should be encrypted using systemd-creds and placed in the /etc/credstore.encrypted/
+# directory. All credentials with the `siguldry` prefix in their name are loaded by the service.
+#
+# $ systemd-creds encrypt /secure/ramfs/siguldry.server.private_key.pem /etc/credstore.encrypted/siguldry.server.private_key.pem
+ImportCredential=siguldry.*
+

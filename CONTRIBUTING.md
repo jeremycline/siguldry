@@ -1,13 +1,14 @@
 # Contribution Guide
 
-Thanks for considering contributing to sigul-pesign-bridge, we really appreciate it!
+Thanks for considering contributing to Siguldry, we really appreciate it!
 
 ## Development Setup
 
 ### Rust
+
 To build and test this project, you will need a relatively recent version of
 [Rust](https://www.rust-lang.org/). The current required version is documented
-in the `Cargo.toml` file for each crate.
+in the `Cargo.toml` file.
 
 ### System Dependencies
 
@@ -15,7 +16,7 @@ A few dependencies from your distribution are also required. This is expected to
 although it may work elsewhere:
 
 ```bash
-sudo dnf install pesign sbsigntools openssl-devel
+sudo dnf install pesign sbsigntools openssl-devel openssl opensc softhsm sequoia-sq sqlite-devel
 ```
 
 Additionally, the CI is easiest to run with containers for the Sigul bridge and server:
@@ -24,27 +25,10 @@ Additionally, the CI is easiest to run with containers for the Sigul bridge and 
 sudo dnf install podman podman-compose
 ```
 
-### Integration Tests
-
-The integration tests use the Sigul server and Sigul bridge which can be tricky to set up. Fortunately,
-there's a container image (built from `devel/Containerfile.sigul`) to make things easier. TLS certificates
-for authenticating with the service as well as signing PE files are baked into the image. For convenience,
-these are also checked into the repository at `devel/creds/` by running `cargo xtask extract-keys` whenever
-a new image is built.
-
-#### Running tests
-
-Start the Sigul server and bridge by running the following from the repository root:
+Finally, the test suite runs via [nextest](https://nexte.st):
 
 ```bash
-# Start the services
-podman compose up -d
-```
-
-Now we can run the tests:
-
-```bash
-cargo test
+cargo install --locked cargo-nextest
 ```
 
 ## Licensing
