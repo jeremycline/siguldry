@@ -200,7 +200,7 @@ async fn handle(
     let keystore_context = sequoia_keystore::Context::configure()
         .ipc_policy(sequoia_keystore::sequoia_ipc::IPCPolicy::External)
         // This is where the sequoia-keystore-server rpm installs it
-        .lib("/usr/libexec/")
+        .lib(&config.sequoia_keystore_server)
         .home(keystore_directory.path())
         .build()?;
     // For GPG keys, we set up a Sequoia keystore server per connection and insert any GPG
@@ -226,10 +226,10 @@ async fn handle(
             .get()
             .try_into()
             .context("frame size must fit in usize")?;
-        // TODO: configurable size limits
-        if json_size > MAX_JSON_SIZE {
+        if json_size > config.max_json_size {
             return Err(anyhow::anyhow!(
-                "JSON payload larger than {MAX_JSON_SIZE} bytes"
+                "JSON payload larger than {} bytes",
+                config.max_json_size
             ));
         }
         let binary_size: usize = frame
@@ -237,9 +237,10 @@ async fn handle(
             .get()
             .try_into()
             .context("frame size must fit in usize")?;
-        if binary_size > MAX_BINARY_SIZE {
+        if binary_size > config.max_binary_size {
             return Err(anyhow::anyhow!(
-                "BINARY payload larger than {MAX_BINARY_SIZE} bytes"
+                "BINARY payload larger than {} bytes",
+                config.max_binary_size
             ));
         }
         let frame_size = json_size + binary_size;

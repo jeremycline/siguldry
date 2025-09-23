@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Credentials;
 
+const MB: usize = 1024 * 1024;
+
 /// Configuration for the siguldry server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -25,6 +27,19 @@ pub struct Config {
     /// The port to connect to the Sigul bridge; the default port is 44333 for
     /// the server.
     pub bridge_port: u16,
+
+    /// The path to the directory containing the Sequoia keystore server executable.
+    pub sequoia_keystore_server: PathBuf,
+
+    /// The size, in bytes, of the maximum acceptable JSON payload.
+    ///
+    /// This defaults to 10MB.
+    pub max_json_size: usize,
+
+    /// The size, in bytes, of the maximum acceptable binary payload.
+    ///
+    /// This defaults to 256MB.
+    pub max_binary_size: usize,
 
     /// The number of ready connections to maintain with the bridge. This decreases the latency of
     /// responses when multiple client connections are established, at the expense of some idle
@@ -129,6 +144,9 @@ impl Default for Config {
             state_directory: PathBuf::from("/var/lib/siguldry/"),
             bridge_hostname: "bridge.example.com".to_string(),
             bridge_port: 44333,
+            sequoia_keystore_server: "/usr/libexec".to_string(),
+            max_json_size: 10 * MB,
+            max_binary_size: 256 * MB,
             connection_pool_size: 32,
             user_password_length: NonZeroU16::new(32).unwrap(),
             credentials: Credentials {
@@ -136,11 +154,7 @@ impl Default for Config {
                 certificate: PathBuf::from("sigul.server.certificate.pem"),
                 ca_certificate: PathBuf::from("sigul.ca.certificate.pem"),
             },
-            pkcs11_bindings: vec![Pkcs11Binding {
-                public_key: PathBuf::from("/etc/siguldry/public_key.pem"),
-                private_key: Some("pkcs11:serial=abc123;id=%01;type=private".to_string()),
-                pin: None,
-            }],
+            pkcs11_bindings: vec![],
             certificate_subject: Default::default(),
         }
     }
