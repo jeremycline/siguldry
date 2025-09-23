@@ -99,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr);
     let registry = tracing_subscriber::registry()
         .with(stderr_layer)
+        .with(tracing_journald::layer().ok())
         .with(log_filter);
     tracing::subscriber::set_global_default(registry)
         .expect("Programming error: set_global_default should only be called once.");

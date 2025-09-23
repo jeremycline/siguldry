@@ -24,7 +24,6 @@ cli = ["clap", "tracing-subscriber", "toml", "tokio/rt-multi-thread", "tokio/sig
 # Build the Sigul 1.2 client
 sigul-client = []
 
-
 [dependencies.anyhow]
 version = "1"
 
@@ -82,7 +81,7 @@ version = "2"
 
 [dependencies.tokio]
 version = "1.27"
-features = ["macros", "net", "rt", "io-util", "time"]
+features = ["macros", "net", "rt", "io-util", "time", "process"]
 
 [dependencies.tokio-util]
 version = "0.7"
@@ -98,6 +97,9 @@ optional = true
 
 [dependencies.tracing]
 version = "0.1.36"
+
+[dependencies.tracing-journald]
+version = "0.3.1"
 
 [dependencies.tracing-subscriber]
 version = "0.3.17"
