@@ -65,5 +65,6 @@ pub mod config;
 pub mod error;
 pub(crate) mod nestls;
 pub mod protocol;
+mod rpm;
 #[cfg(feature = "server")]
 pub mod server;
