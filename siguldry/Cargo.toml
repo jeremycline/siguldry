@@ -15,7 +15,7 @@ repository = "https://github.com/fedora-infra/siguldry"
 workspace = true
 
 [features]
-default = ["server", "cli"]
+default = ["server", "cli", "rpm"]
 # Enable the server APIs
 server = ["sqlx", "sequoia-keystore", "sequoia-openpgp", "rustix"]
 # Build command-line interfaces for enabled components
@@ -23,6 +23,9 @@ cli = ["clap", "tracing-subscriber", "toml", "tokio/rt-multi-thread", "tokio/sig
 
 # Build the Sigul 1.2 client
 sigul-client = []
+
+# Depends on bindgen; TODO can that be an optional dep?
+rpm = ["libc"]
 
 
 [dependencies.anyhow]
@@ -39,6 +42,10 @@ optional = true
 
 [dependencies.hex]
 version = "0.4"
+
+[dependencies.libc]
+version = "0.2"
+optional = true
 
 [dependencies.openssl]
 version = "0.10"
@@ -114,6 +121,10 @@ features = ["v7", "serde"]
 version = "0.8"
 features = ["std", "derive"]
 
+# We use a small number of librpm functions in the client when built with RPM
+# signing support.
+[build-dependencies]
+bindgen = "0.72"
 
 [dev-dependencies]
 anyhow = "1"
