@@ -3,7 +3,7 @@ resolver = "3"
 members = [
     "sample-uefi",
     "sigul-pesign-bridge",
-    "siguldry",
+    "siguldry", "siguldry-autosign",
     "xtask",
 ]
 

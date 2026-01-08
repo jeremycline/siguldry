@@ -1,0 +1,60 @@
+[package]
+name = "siguldry-autosign"
+version = "0.1.0"
+rust-version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies.anyhow]
+version = "1.0.47"
+
+[dependencies.clap]
+version = "4.0"
+default-features = false
+features = ["std", "derive", "env", "help", "usage", "error-context"]
+
+[dependencies.futures-lite]
+version = "2"
+
+[dependencies.lapin]
+version = "3.6"
+default-features = false
+features = ["openssl", "default-runtime", "codegen"]
+
+[dependencies.siguldry]
+path = "../siguldry"
+version = "0.5"
+default-features = false
+
+[dependencies.tokio]
+version = "1.27"
+features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "time", "process", "fs"]
+
+# Used for the CancellationToken
+[dependencies.tokio-util]
+version = "0.7.1"
+features = ["rt"]
+
+[dependencies.tracing]
+version = "0.1.36"
+
+[dependencies.tracing-subscriber]
+version = "0.3.17"
+default-features = false
+features = ["std", "registry", "fmt", "env-filter"]
+
+# Used for deserializing the configuration file
+[dependencies.toml]
+version = "0.9"
+
+[dependencies.serde]
+version = "1.0.145"
+features = ["derive"]
+
+# Used to generate unique IDs for each signing request; used in logs.
+[dependencies.uuid]
+version = "1.6"
+features = ["v7"]
