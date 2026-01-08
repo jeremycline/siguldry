@@ -9,10 +9,14 @@ use siguldry::{
     client::{Client, Config},
     config::load_config,
 };
+use tokio::signal::unix::{SignalKind, signal};
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan, layer::SubscriberExt};
 
 // The path, relative to $XDG_CONFIG_HOME, of the default config file location.
 const DEFAULT_CONFIG: &str = "siguldry/client.toml";
+
+mod proxy;
 
 /// The siguldry client
 #[derive(Debug, Parser)]
@@ -80,6 +84,15 @@ enum Command {
     ListUsers,
     /// See the current configuration, or the defaults if no configuration file is supplied.
     Config,
+
+    /// Run the client as a service that listens on a Unix socket for signing requests to proxy.
+    ///
+    /// In this mode, any process with access to the socket can sign content. This is primarily
+    /// useful as a way to keep secrets out of processes handling content.
+    Proxy {
+        /// The location of the varlink Unix socket
+        socket: PathBuf,
+    },
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -132,7 +145,41 @@ async fn main() -> anyhow::Result<()> {
             println!("{users}");
         }
         Command::Config => unreachable!("Command handled prior to this match"),
+        Command::Proxy { socket } => {
+            let halt_token = CancellationToken::new();
+            tokio::spawn(signal_handler(halt_token.clone()));
+            proxy::listen(client, socket, halt_token)?.await??;
+        }
     }
 
     Ok(())
+}
+
+/// Install and manage signal handlers for the process.
+///
+/// # SIGTERM and SIGINT
+///
+/// Sending SIGTERM or SIGINT to the process will cause it to stop accepting new
+/// signing requests. Existing signing requests will be allowed to complete
+/// before the process shuts down.
+async fn signal_handler(halt_token: CancellationToken) -> Result<(), anyhow::Error> {
+    let mut sigterm_stream = signal(SignalKind::terminate()).inspect_err(|error| {
+        tracing::error!(?error, "Failed to register a SIGTERM signal handler");
+    })?;
+    let mut sigint_stream = signal(SignalKind::interrupt()).inspect_err(|error| {
+        tracing::error!(?error, "Failed to register a SIGINT signal handler");
+    })?;
+
+    loop {
+        tokio::select! {
+            _ = sigterm_stream.recv() => {
+                tracing::info!("SIGTERM received, beginning service shutdown");
+                halt_token.cancel();
+            }
+            _ = sigint_stream.recv() => {
+                tracing::info!("SIGINT received, beginning service shutdown");
+                halt_token.cancel();
+            }
+        }
+    }
 }
