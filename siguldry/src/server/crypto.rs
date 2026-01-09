@@ -24,6 +24,7 @@ use openssl::{
     hash::MessageDigest,
     nid::Nid,
     pkey::PKey,
+    pkey_ctx::PkeyCtx,
     rsa::Rsa,
     stack::Stack,
     symm::Cipher,
@@ -49,7 +50,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqliteConnection;
 
 use crate::{
-    protocol::KeyAlgorithm,
+    protocol::{self, DigestAlgorithm, KeyAlgorithm},
     server::{config::Pkcs11Binding, db},
 };
 
@@ -706,6 +707,56 @@ async fn import_pkcs11_token_private(
     Ok(token)
 }
 
+/// Sign a set of digests with the given key.
+pub fn sign(
+    key: &db::Key,
+    password: &Password,
+    digests: Vec<(DigestAlgorithm, String)>,
+) -> anyhow::Result<Vec<protocol::json::Signature>> {
+    // TODO: This is exclusively for nonPGP soft keys
+    let pkey = match key.key_algorithm {
+        KeyAlgorithm::Rsa4K => password
+            .map(|password| {
+                Rsa::private_key_from_pem_passphrase(key.key_material.as_bytes(), password)
+            })
+            .and_then(PKey::from_rsa),
+        KeyAlgorithm::P256 => password
+            .map(|password| {
+                EcKey::private_key_from_pem_passphrase(key.key_material.as_bytes(), password)
+            })
+            .and_then(PKey::from_ec_key),
+    }?;
+
+    let mut signatures = Vec::with_capacity(digests.len());
+    for (algorithm, hex_hash) in digests {
+        let hash = hex::decode(&hex_hash).context("The digest provided was not valid hex")?;
+        if hash.len() != algorithm.size() {
+            return Err(anyhow::anyhow!(
+                "The specified digest algorithm is {} bytes; payload was {}",
+                algorithm.size(),
+                hash.len()
+            ));
+        }
+
+        let mut ctx = PkeyCtx::new(&pkey)?;
+        ctx.sign_init()?;
+        ctx.set_signature_md(algorithm.into())?;
+        if key.key_algorithm == KeyAlgorithm::Rsa4K {
+            // PKCS #1 should be the default, but lets be explicit about it.
+            ctx.set_rsa_padding(openssl::rsa::Padding::PKCS1)?;
+        }
+        let mut signature = vec![];
+        ctx.sign_to_vec(&hash, &mut signature)?;
+        signatures.push(protocol::json::Signature {
+            signature,
+            digest: algorithm,
+            hash: hex_hash,
+        });
+    }
+
+    Ok(signatures)
+}
+
 #[cfg(test)]
 mod tests {
     use std::process::Command;
@@ -1095,7 +1146,7 @@ mod tests {
     #[tokio::test]
     async fn import_pkcs11_keys() -> Result<()> {
         let _hsm = setup_hsm()?;
-        let db_pool = db::pool("sqlite::memory:").await?;
+        let db_pool = db::pool("sqlite::memory:", false).await?;
         db::migrate(&db_pool).await?;
         let mut conn = db_pool.begin().await?;
 

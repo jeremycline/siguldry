@@ -16,7 +16,7 @@ static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/");
 /// # Example
 ///
 /// ```rust,no_run
-/// let db = pool("sqlite::memory:")?;
+/// let db = pool("sqlite::memory:", false)?;
 /// migrate(&db).await?;
 /// ```
 #[instrument]
@@ -29,11 +29,14 @@ pub async fn migrate(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
 }
 
 /// Get a database pool.
-pub async fn pool(db_uri: &str) -> anyhow::Result<Pool<Sqlite>> {
+///
+/// If `read_only` is `true`, the database will be opened in read-only mode.
+pub async fn pool(db_uri: &str, read_only: bool) -> anyhow::Result<Pool<Sqlite>> {
     let opts = SqliteConnectOptions::from_str(db_uri)
         .context("The database URL couldn't be parsed.")?
         .create_if_missing(true)
         .foreign_keys(true)
+        .read_only(read_only)
         .optimize_on_close(true, Some(400));
     SqlitePool::connect_with(opts)
         .await
@@ -533,7 +536,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_delete_user() -> Result<()> {
-        let db_pool = pool("sqlite::memory:").await?;
+        let db_pool = pool("sqlite::memory:", false).await?;
         migrate(&db_pool).await?;
         let mut conn = db_pool.begin().await?;
         let name = "test-user";
@@ -555,7 +558,7 @@ mod tests {
 
     #[tokio::test]
     async fn user_must_be_unique() -> Result<()> {
-        let db_pool = pool("sqlite::memory:").await?;
+        let db_pool = pool("sqlite::memory:", false).await?;
         migrate(&db_pool).await?;
         let mut conn = db_pool.begin().await?;
         let name = "test-user";
@@ -572,7 +575,7 @@ mod tests {
     // Assert the KeyType enum aligns with the database enumeration.
     #[tokio::test]
     async fn key_algorithms_match_db() -> Result<()> {
-        let db_pool = pool("sqlite::memory:").await?;
+        let db_pool = pool("sqlite::memory:", false).await?;
         migrate(&db_pool).await?;
         let mut conn = db_pool.begin().await?;
 
@@ -596,7 +599,7 @@ mod tests {
     // Assert the KeyLocation enum aligns with the database enumeration.
     #[tokio::test]
     async fn key_purposes_match_db() -> Result<()> {
-        let db_pool = pool("sqlite::memory:").await?;
+        let db_pool = pool("sqlite::memory:", false).await?;
         migrate(&db_pool).await?;
         let mut conn = db_pool.begin().await?;
 
@@ -620,7 +623,7 @@ mod tests {
     // Assert the PublicKeyMaterialType enum aligns with the database enumeration.
     #[tokio::test]
     async fn public_key_material_types() -> Result<()> {
-        let db_pool = pool("sqlite::memory:").await?;
+        let db_pool = pool("sqlite::memory:", false).await?;
         migrate(&db_pool).await?;
         let mut conn = db_pool.begin().await?;
 
@@ -644,7 +647,7 @@ mod tests {
     // Assert keys can be created and removed from the database.
     #[tokio::test]
     async fn key_create_list_delete() -> Result<()> {
-        let db_pool = pool("sqlite::memory:").await?;
+        let db_pool = pool("sqlite::memory:", false).await?;
         migrate(&db_pool).await?;
         let mut conn = db_pool.begin().await?;
         let key = Key::create(
@@ -672,7 +675,7 @@ mod tests {
     // Keys should only be allowed to have purposes from the key_purpose table.
     #[tokio::test]
     async fn key_constraint_on_purpose() -> Result<()> {
-        let db_pool = pool("sqlite::memory:").await?;
+        let db_pool = pool("sqlite::memory:", false).await?;
         migrate(&db_pool).await?;
         let mut conn = db_pool.begin().await?;
         let key_algorithm_str = KeyAlgorithm::P256.as_str();
@@ -703,7 +706,7 @@ mod tests {
     // Keys should only be allowed to have types from the key_algorithms table.
     #[tokio::test]
     async fn key_constraint_on_algorithm_type() -> Result<()> {
-        let db_pool = pool("sqlite::memory:").await?;
+        let db_pool = pool("sqlite::memory:", false).await?;
         migrate(&db_pool).await?;
         let mut conn = db_pool.begin().await?;
         let key_location_str = KeyPurpose::PGP.as_str();

@@ -112,6 +112,7 @@ pub async fn manage(command: ManagementCommands, config: Config) -> anyhow::Resu
             .as_os_str()
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Database path isn't valid UTF8"))?,
+        false,
     )
     .await?;
 
@@ -1352,7 +1353,7 @@ mod tests {
         for command in commands {
             manage(command, test.config().clone()).await?;
         }
-        let pool = db::pool(test.config().database().as_os_str().to_str().unwrap()).await?;
+        let pool = db::pool(test.config().database().as_os_str().to_str().unwrap(), true).await?;
         let mut conn = pool.begin().await?;
         let user = db::User::get(&mut conn, "admin").await?;
         for key in db::Key::list(&mut conn).await? {

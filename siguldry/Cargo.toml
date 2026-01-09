@@ -153,5 +153,9 @@ name = "siguldry-server"
 required-features = ["server", "cli"]
 
 [[bin]]
+name = "siguldry-signer"
+required-features = ["server", "cli"]
+
+[[bin]]
 name = "siguldry-bridge"
 required-features = ["cli"]

@@ -47,6 +47,8 @@ pub struct Config {
     /// The rest of the certificate's subject is specified here.
     pub certificate_subject: X509SubjectName,
 
+    pub signer_executable: PathBuf,
+
     /// The set of certificates to encrypt passwords with.
     ///
     /// At least one entry should include a PKCS#11 URI for a private key. Passwords are encrypted
@@ -131,6 +133,7 @@ impl Default for Config {
             bridge_port: 44333,
             connection_pool_size: 32,
             user_password_length: NonZeroU16::new(32).unwrap(),
+            signer_executable: PathBuf::from("/usr/libexec/siguldry-signer"),
             credentials: Credentials {
                 private_key: PathBuf::from("siguldry.server.private_key.pem"),
                 certificate: PathBuf::from("siguldry.server.certificate.pem"),

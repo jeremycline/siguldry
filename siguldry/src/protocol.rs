@@ -619,6 +619,17 @@ impl From<DigestAlgorithm> for openssl::hash::MessageDigest {
     }
 }
 
+impl From<DigestAlgorithm> for &'static openssl::md::MdRef {
+    fn from(value: DigestAlgorithm) -> Self {
+        match value {
+            DigestAlgorithm::Sha256 => openssl::md::Md::sha256(),
+            DigestAlgorithm::Sha512 => openssl::md::Md::sha512(),
+            DigestAlgorithm::Sha3_256 => openssl::md::Md::sha3_256(),
+            DigestAlgorithm::Sha3_512 => openssl::md::Md::sha3_512(),
+        }
+    }
+}
+
 /// A request sent by the client.
 #[derive(Debug, Clone)]
 pub(crate) struct Request {
