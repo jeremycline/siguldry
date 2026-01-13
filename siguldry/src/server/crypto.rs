@@ -8,9 +8,16 @@
 
 use std::{
     io::{Read, Write},
+    path::PathBuf,
     process::Stdio,
 };
 
+use anyhow::Context;
+use cryptoki::{
+    context::{CInitializeArgs, CInitializeFlags, Pkcs11},
+    object::{Attribute, AttributeType, ObjectClass},
+    types::AuthPin,
+};
 use openssl::{
     cms::{CMSOptions, CmsContentInfo},
     ec::{EcGroup, EcKey},
@@ -20,7 +27,7 @@ use openssl::{
     rsa::Rsa,
     stack::Stack,
     symm::Cipher,
-    x509::X509,
+    x509::{self, X509},
 };
 use sequoia_openpgp::{
     Profile,
@@ -39,8 +46,12 @@ use sequoia_openpgp::{
     types::{KeyFlags, SymmetricAlgorithm},
 };
 use serde::{Deserialize, Serialize};
+use sqlx::SqliteConnection;
 
-use crate::{protocol::KeyAlgorithm, server::config::Pkcs11Binding};
+use crate::{
+    protocol::KeyAlgorithm,
+    server::{config::Pkcs11Binding, db},
+};
 
 pub(crate) fn generate_password() -> anyhow::Result<Password> {
     let mut buf = [0; 128];
@@ -446,11 +457,261 @@ async fn binding_decrypt(binding: Pkcs11Binding, data: Vec<u8>) -> anyhow::Resul
     Ok(output.stdout)
 }
 
+/// Import keys and certificates from a PKCS#11 token.
+///
+/// This creates records for the key pairs stored in a PKCS#11 module, along with any x509 certificates
+/// associated with them.
+pub async fn import_pkcs11_token(
+    conn: &mut SqliteConnection,
+    module: PathBuf,
+    token_user_pin: AuthPin,
+) -> anyhow::Result<db::Pkcs11Token> {
+    let pkcs11 = Pkcs11::new(&module).context("Failed to load the PKCS#11 module specified.")?;
+    pkcs11
+        .initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK))
+        .context("Failed to initialized the PKCS#11 module")?;
+    let result = import_pkcs11_token_private(&pkcs11, conn, module, token_user_pin).await;
+    pkcs11.finalize()?;
+    result
+}
+
+async fn import_pkcs11_token_private(
+    pkcs11: &Pkcs11,
+    conn: &mut SqliteConnection,
+    module: PathBuf,
+    token_user_pin: AuthPin,
+) -> anyhow::Result<db::Pkcs11Token> {
+    let slot = pkcs11
+        .get_slots_with_token()?
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("The provided token has no slots"))?;
+    let token_info = pkcs11
+        .get_token_info(slot)
+        .context("Unable to read token information")?;
+    let session = pkcs11
+        .open_ro_session(slot)
+        .context("Unable to open a read-only session with the token")?;
+    session
+        .login(cryptoki::session::UserType::User, Some(&token_user_pin))
+        .context("Failed to login to the token with the provided user PIN")?;
+
+    let manufacturer_id = if token_info.manufacturer_id().is_empty() {
+        None
+    } else {
+        Some(token_info.manufacturer_id().to_string())
+    };
+    let model = if token_info.model().is_empty() {
+        None
+    } else {
+        Some(token_info.model().to_string())
+    };
+    let label = if token_info.label().is_empty() {
+        return Err(anyhow::anyhow!("PKCS #11 token needs to have a label"));
+    } else {
+        token_info.label().to_string()
+    };
+    let serial_number = if token_info.serial_number().is_empty() {
+        return Err(anyhow::anyhow!(
+            "PKCS #11 token needs to have a serial_number"
+        ));
+    } else {
+        token_info.serial_number().to_string()
+    };
+    let token =
+        db::Pkcs11Token::create(conn, module, label, manufacturer_id, model, serial_number).await?;
+
+    // Look through the private keys, then match them up with related public key and certificates
+    // using the Id attribute. Once all the bits are collect them, add them to the database.
+    struct TokenKey {
+        label: String,
+        key_type: cryptoki::object::KeyType,
+        public_key_der: Option<Vec<u8>>,
+        x509_certificate_pem: Option<String>,
+    }
+    let mut token_keys: std::collections::HashMap<Vec<u8>, TokenKey> =
+        std::collections::HashMap::new();
+    let private_key_attributes = [
+        AttributeType::Id,
+        AttributeType::Label,
+        AttributeType::KeyType,
+        AttributeType::Class,
+    ];
+    for object in session
+        .iter_objects(&[Attribute::Class(ObjectClass::PRIVATE_KEY)])
+        .context("Failed to search private key objects")?
+    {
+        let object = object?;
+        let attributes = session
+            .get_attributes(object, &private_key_attributes)
+            .context("Failed to query private key attributes")?;
+
+        let mut key_id = None;
+        let mut label = None;
+        let mut key_type = None;
+
+        for attr in attributes {
+            match attr {
+                Attribute::Id(id) => key_id = Some(id),
+                Attribute::Label(l) => {
+                    label = String::from_utf8(l).ok();
+                }
+                Attribute::KeyType(kt) => key_type = Some(kt),
+                _ => {}
+            }
+        }
+
+        if let (Some(id), Some(label), Some(key_type)) = (key_id, label, key_type) {
+            token_keys.insert(
+                id,
+                TokenKey {
+                    label,
+                    key_type,
+                    public_key_der: None,
+                    x509_certificate_pem: None,
+                },
+            );
+        }
+    }
+
+    let public_key_attributes = [AttributeType::Id, AttributeType::PublicKeyInfo];
+    for object in session
+        .iter_objects(&[Attribute::Class(ObjectClass::PUBLIC_KEY)])
+        .context("Failed to search public key objects")?
+    {
+        let object = object?;
+        let attributes = session
+            .get_attributes(object, &public_key_attributes)
+            .context("Failed to query public key attributes")?;
+
+        let mut key_id = None;
+        let mut public_key_info = None;
+
+        for attr in attributes {
+            match attr {
+                Attribute::Id(id) => key_id = Some(id),
+                Attribute::PublicKeyInfo(der) => public_key_info = Some(der),
+                _ => {}
+            }
+        }
+
+        if let (Some(id), Some(der)) = (key_id, public_key_info)
+            && let Some(entry) = token_keys.get_mut(&id)
+        {
+            entry.public_key_der = Some(der);
+        }
+    }
+
+    // Pull out any certificates in the token for the key pairs we know about
+    let certificate_attributes = [AttributeType::Id, AttributeType::Value];
+    for object in session
+        .iter_objects(&[Attribute::Class(ObjectClass::CERTIFICATE)])
+        .context("Failed to search certificate objects")?
+    {
+        let object = object?;
+        let attributes = session
+            .get_attributes(object, &certificate_attributes)
+            .context("Failed to query certificate attributes")?;
+
+        let mut key_id = None;
+        let mut cert_der = None;
+
+        for attr in attributes {
+            match attr {
+                Attribute::Id(id) => key_id = Some(id),
+                Attribute::Value(der) => cert_der = Some(der),
+                _ => {}
+            }
+        }
+
+        if let (Some(id), Some(der)) = (key_id, cert_der)
+            && let Some(entry) = token_keys.get_mut(&id)
+        {
+            let pem = x509::X509::from_der(&der)
+                .and_then(|cert| cert.to_pem())
+                .ok()
+                .and_then(|pem_bytes| String::from_utf8(pem_bytes).ok());
+            entry.x509_certificate_pem = pem;
+        }
+    }
+
+    for (key_id, key_info) in &token_keys {
+        if let Some(public_key) = key_info
+            .public_key_der
+            .as_deref()
+            .map(openssl::pkey::PKey::public_key_from_der)
+        {
+            let public_key = public_key?;
+            let key_algorithm = match key_info.key_type {
+                cryptoki::object::KeyType::EC => {
+                    let ecc_key = public_key.ec_key()?;
+                    if ecc_key.group().curve_name() == Some(Nid::X9_62_PRIME256V1) {
+                        KeyAlgorithm::P256
+                    } else {
+                        tracing::warn!(
+                            label = key_info.label,
+                            "Found unsupported ECC key; skipping"
+                        );
+                        continue;
+                    }
+                }
+                cryptoki::object::KeyType::RSA => {
+                    // Double check it's an RSA key
+                    let _ = public_key.rsa()?;
+                    match public_key.bits() {
+                        4096 => KeyAlgorithm::Rsa4K,
+                        other => {
+                            tracing::warn!(
+                                label = key_info.label,
+                                "Found unsupported RSA key of size {}",
+                                other
+                            );
+                            continue;
+                        }
+                    }
+                }
+                unsupported => {
+                    tracing::warn!(
+                        label = key_info.label,
+                        "Found unsupported key type {:?}",
+                        unsupported
+                    );
+                    continue;
+                }
+            };
+
+            let pubkey_pem = String::from_utf8(public_key.public_key_to_pem()?)?;
+            let handle = format!(
+                "{:X?}",
+                openssl::hash::hash(MessageDigest::sha256(), &public_key.public_key_to_der()?)?
+            );
+            let key_material = format!("{:X?}", key_id);
+            let key = db::Key::create(
+                conn,
+                &key_info.label,
+                &handle,
+                key_algorithm,
+                db::KeyPurpose::Signing,
+                &key_material,
+                &pubkey_pem,
+                Some(&token),
+            )
+            .await?;
+            if let Some(data) = key_info.x509_certificate_pem.clone() {
+                db::PublicKeyMaterial::create(conn, &key, db::PublicKeyMaterialType::X509, data)
+                    .await?;
+            }
+        }
+    }
+
+    Ok(token)
+}
+
 #[cfg(test)]
 mod tests {
     use std::process::Command;
 
     use anyhow::Result;
+    use cryptoki::{mechanism::Mechanism, session::UserType};
     use tempfile::{NamedTempFile, TempDir};
 
     use super::*;
@@ -530,78 +791,137 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct SoftHsm {
-        _conf_file: NamedTempFile,
+    struct Hsm {
         _directory: TempDir,
         bindings: Vec<Pkcs11Binding>,
     }
 
-    // Set up a temporary SoftHSM token.
+    // Set up a temporary PKCS#11 token.
     //
     // Note that tests using this must alter their environment which is not thread safe.
     // Thus, you will see failures if you don't use nextest.
-    fn setup_softhsm() -> anyhow::Result<SoftHsm> {
+    fn setup_hsm() -> anyhow::Result<Hsm> {
         let hsm_dir = TempDir::new()?;
-        let softhsm_conf_file = NamedTempFile::new()?;
-        let softhsm_conf = format!("directories.tokendir = {}\n", hsm_dir.path().display());
-        std::fs::write(&softhsm_conf_file, softhsm_conf)?;
-        let possible_softhsm_paths = [
-            "/usr/lib64/softhsm/libsofthsm.so",
-            "/usr/lib/softhsm/libsofthsm2.so",
-        ];
-        let mut softhsm_path = "";
-        for path in possible_softhsm_paths {
-            if std::fs::exists(path)? {
-                softhsm_path = path;
-                break;
-            }
-        }
+        let hsm_config_path = hsm_dir.path().join("kryoptic.toml");
+        let hsm_db_path = hsm_dir.path().join("kryoptic.sql");
+        std::fs::write(
+            &hsm_config_path,
+            format!(
+                "[[slots]]\nslot = 1\ndbtype = \"sqlite\"\ndbargs = \"{}\"",
+                hsm_db_path.display()
+            ),
+        )?;
+        // SAFETY:
+        // These tests are required to run with nextest, which starts a new process for each test.
+        // Using set_var is only safe if no other code is interacting with the environment variables,
+        // which should be true under nextest. Refer to
+        // https://nexte.st/docs/configuration/env-vars/#altering-the-environment-within-tests to ensure
+        // this remains the case with current versions of Rust.
+        unsafe {
+            std::env::set_var("KRYOPTIC_CONF", &hsm_config_path);
+        };
 
-        let mut command = Command::new("softhsm2-util");
-        let output = command
-            .env("SOFTHSM2_CONF", softhsm_conf_file.path())
-            .args([
-                "--init-token",
-                "--slot=0",
-                "--label=test",
-                "--pin=secret-password",
-                "--so-pin=1234",
-            ])
-            .output()?;
-        if !output.status.success() {
-            panic!(
-                "Failed to initialize SoftHSM token: {:?}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
+        let module_path = "/usr/lib64/pkcs11/libkryoptic_pkcs11.so";
+        let pkcs11 = Pkcs11::new(module_path).context("Install the kryoptic PKCS#11 module")?;
+        pkcs11
+            .initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK))
+            .context("Failed to initialized kryoptic PKCS#11 module")?;
+        let slot = pkcs11
+            .get_slots_with_token()?
+            .pop()
+            .expect("no slot available");
+        let so_pin = AuthPin::new("12345678".into());
+        let user_pin = AuthPin::new("secret-password".into());
+        pkcs11
+            .init_token(slot, &so_pin, "test")
+            .context("Failed to initialize token")?;
+        pkcs11
+            .open_rw_session(slot)
+            .and_then(|session| {
+                session.login(UserType::So, Some(&so_pin))?;
+                session.init_pin(&user_pin)?;
 
-        let mut command = Command::new("pkcs11-tool");
-        let output = command
-            .env("SOFTHSM2_CONF", softhsm_conf_file.path())
-            .arg(format!("--module={}", softhsm_path))
-            .args([
-                "--login",
-                "--pin=secret-password",
-                "--keypairgen",
-                "--label=binding-key",
-                "--key-type=rsa:4096",
-                "--usage-decrypt",
-                "--usage-sign",
-                "--id=1",
-            ])
-            .output()?;
-        if !output.status.success() {
-            panic!(
-                "Failed to create key in SoftHSM token: {:?}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        let uri = "pkcs11:model=SoftHSM%20v2;manufacturer=SoftHSM%20project;token=test;object=binding-key;id=%01;type=private";
+                session.generate_key_pair(
+                    &Mechanism::RsaPkcsKeyPairGen,
+                    &[
+                        Attribute::Id(vec![1]),
+                        Attribute::Label(b"binding-key".to_vec()),
+                        Attribute::Token(true),
+                        Attribute::Private(false),
+                        Attribute::Verify(true),
+                        Attribute::Encrypt(true),
+                        Attribute::ModulusBits(4096.into()),
+                    ],
+                    &[
+                        Attribute::Id(vec![1]),
+                        Attribute::Label(b"binding-key".to_vec()),
+                        Attribute::Token(true),
+                        Attribute::Private(true),
+                        Attribute::Sensitive(true),
+                        Attribute::Sign(true),
+                        Attribute::Decrypt(true),
+                    ],
+                )?;
 
+                // Annoyingly it doesn't seem possible to convert the named curve Nid to ASN.1, so we manually
+                // create it from the OID for NIST P-256. Furthermore, converting the Asn1Object to bytes doesn't
+                // include the tag or length, just the value, so we have to manually do that too.
+                let p256_oid = openssl::asn1::Asn1Object::from_str("1.2.840.10045.3.1.7")
+                    .expect("This is the NIST P-256 OID");
+                let oid_content = p256_oid.as_slice();
+                let mut p256_oid_bytes: Vec<u8> = vec![0x06, oid_content.len() as u8];
+                p256_oid_bytes.extend_from_slice(oid_content);
+                session.generate_key_pair(
+                    &Mechanism::EccKeyPairGen,
+                    &[
+                        Attribute::Id(vec![2]),
+                        Attribute::Label(b"ecc-test-key".to_vec()),
+                        Attribute::Token(true),
+                        Attribute::Private(false),
+                        Attribute::EcParams(p256_oid_bytes),
+                        Attribute::Verify(true),
+                    ],
+                    &[
+                        Attribute::Id(vec![2]),
+                        Attribute::Label(b"ecc-test-key".to_vec()),
+                        Attribute::Token(true),
+                        Attribute::Private(true),
+                        Attribute::Sensitive(true),
+                        Attribute::Sign(true),
+                    ],
+                )?;
+
+                // Add unsupported key
+                session.generate_key_pair(
+                    &Mechanism::RsaPkcsKeyPairGen,
+                    &[
+                        Attribute::Id(vec![3]),
+                        Attribute::Label(b"unsupported-rsa-key".to_vec()),
+                        Attribute::Token(true),
+                        Attribute::Private(false),
+                        Attribute::Verify(true),
+                        Attribute::ModulusBits(1024.into()),
+                    ],
+                    &[
+                        Attribute::Id(vec![3]),
+                        Attribute::Label(b"unsupported-rsa-key".to_vec()),
+                        Attribute::Token(true),
+                        Attribute::Private(true),
+                        Attribute::Sensitive(true),
+                        Attribute::Sign(true),
+                    ],
+                )?;
+                Ok(())
+            })
+            .context("Failed to initialize user pin")?;
+
+        pkcs11.finalize()?;
+
+        let rsa_key_uri = "pkcs11:model=v1;manufacturer=Kryoptic%20Project;token=test;id=%01;object=binding-key;type=private";
         let cert_file = hsm_dir.path().join("cert0");
         let mut command = Command::new("openssl");
         let output = command
-            .env("SOFTHSM2_CONF", softhsm_conf_file.path())
+            .env("KRYOPTIC_CONF", &hsm_config_path)
             .args([
                 "req",
                 "-x509",
@@ -610,10 +930,10 @@ mod tests {
                 "-passin",
                 "pass:secret-password",
                 "-subj",
-                "/CN=Test",
+                "/CN=BindingKey",
             ])
             .arg("-key")
-            .arg(uri)
+            .arg(rsa_key_uri)
             .arg("-out")
             .arg(&cert_file)
             .output()?;
@@ -626,8 +946,8 @@ mod tests {
 
         let mut command = Command::new("pkcs11-tool");
         let output = command
-            .env("SOFTHSM2_CONF", softhsm_conf_file.path())
-            .arg(format!("--module={}", softhsm_path))
+            .env("KRYOPTIC_CONF", &hsm_config_path)
+            .arg(format!("--module={}", module_path))
             .args([
                 "--login",
                 "--pin=secret-password",
@@ -646,7 +966,7 @@ mod tests {
 
         let binding = Pkcs11Binding {
             public_key: cert_file,
-            private_key: Some(uri.to_string()),
+            private_key: Some(rsa_key_uri.to_string()),
             pin: Some(Password::from("secret-password")),
         };
 
@@ -678,20 +998,7 @@ mod tests {
             });
         }
 
-        // SAFETY:
-        // These tests are required to run with nextest, which starts a new process for each test.
-        // Using set_var is only safe if no other code is interacting with the environment variables,
-        // which should be true under nextest. Refer to
-        // https://nexte.st/docs/configuration/env-vars/#altering-the-environment-within-tests to ensure
-        // this remains the case with current versions of Rust.
-        //
-        // The alternative approach is to use the default config and randomly generate key names, but
-        // cleanup isn't as neat. Maybe one day softhsm will allow for config files via arguments.
-        unsafe {
-            std::env::set_var("SOFTHSM2_CONF", softhsm_conf_file.path());
-        }
-        Ok(SoftHsm {
-            _conf_file: softhsm_conf_file,
+        Ok(Hsm {
             _directory: hsm_dir,
             bindings,
         })
@@ -700,7 +1007,7 @@ mod tests {
     /// Assert encrypting and then decrypting for bindings works.
     #[tokio::test]
     async fn encrypt_decrypt_binding() -> Result<()> {
-        let softhsm = setup_softhsm()?;
+        let softhsm = setup_hsm()?;
 
         let binding = softhsm.bindings.first().unwrap();
         let bound_password = binding_encrypt(binding, b"some data")?;
@@ -722,7 +1029,7 @@ mod tests {
     /// Assert the complete encryption/decryption process roundtrips as expected.
     #[tokio::test]
     async fn encrypt_decrypt_key_password() -> Result<()> {
-        let softhsm = setup_softhsm()?;
+        let softhsm = setup_hsm()?;
 
         let key_password = Password::from("a secret that never leaves the server");
         let user_password = Password::from("some long password clients provide");
@@ -742,7 +1049,7 @@ mod tests {
     // Assert if no bindings include keys, we get an error
     #[tokio::test]
     async fn encrypt_decrypt_key_password_binding_no_key() -> Result<()> {
-        let softhsm = setup_softhsm()?;
+        let softhsm = setup_hsm()?;
 
         let key_password = Password::from("a secret that never leaves the server");
         let user_password = Password::from("some long password clients provide");
@@ -761,7 +1068,7 @@ mod tests {
     // We should get an error if the user password is incorrect
     #[tokio::test]
     async fn encrypt_decrypt_key_password_wrong_user_password() -> Result<()> {
-        let softhsm = setup_softhsm()?;
+        let softhsm = setup_hsm()?;
 
         let key_password = Password::from("a secret that never leaves the server");
         let user_password = Password::from("some long password clients provide");
@@ -782,6 +1089,39 @@ mod tests {
         let blob = encrypt_key_password(&[], user_password.clone(), key_password.clone())?;
         let roundtrip_key_password = decrypt_key_password(&[], user_password, &blob).await?;
         assert_eq!(key_password, roundtrip_key_password);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn import_pkcs11_keys() -> Result<()> {
+        let _hsm = setup_hsm()?;
+        let db_pool = db::pool("sqlite::memory:").await?;
+        db::migrate(&db_pool).await?;
+        let mut conn = db_pool.begin().await?;
+
+        super::import_pkcs11_token(
+            &mut conn,
+            PathBuf::from("/usr/lib64/pkcs11/libkryoptic_pkcs11.so"),
+            AuthPin::new("secret-password".into()),
+        )
+        .await?;
+
+        let keys = db::Key::list(&mut conn).await?;
+        assert_eq!(keys.len(), 2);
+        for key in keys {
+            if key.key_algorithm == KeyAlgorithm::Rsa4K {
+                let certs =
+                    db::PublicKeyMaterial::list(&mut conn, &key, db::PublicKeyMaterialType::X509)
+                        .await?;
+                assert_eq!(certs.len(), 1);
+            } else {
+                let certs =
+                    db::PublicKeyMaterial::list(&mut conn, &key, db::PublicKeyMaterialType::X509)
+                        .await?;
+                assert_eq!(certs.len(), 0);
+            }
+        }
+
         Ok(())
     }
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT * FROM keys WHERE name = $1;",
+  "query": "SELECT * FROM pkcs11_tokens;",
   "describe": {
     "columns": [
       {
@@ -9,54 +9,42 @@
         "type_info": "Integer"
       },
       {
-        "name": "name",
+        "name": "module_path",
         "ordinal": 1,
         "type_info": "Text"
       },
       {
-        "name": "key_algorithm",
+        "name": "label",
         "ordinal": 2,
         "type_info": "Text"
       },
       {
-        "name": "key_purpose",
+        "name": "manufacturer_id",
         "ordinal": 3,
         "type_info": "Text"
       },
       {
-        "name": "handle",
+        "name": "model",
         "ordinal": 4,
         "type_info": "Text"
       },
       {
-        "name": "key_material",
+        "name": "serial_number",
         "ordinal": 5,
         "type_info": "Text"
-      },
-      {
-        "name": "public_key",
-        "ordinal": 6,
-        "type_info": "Text"
-      },
-      {
-        "name": "pkcs11_token_id",
-        "ordinal": 7,
-        "type_info": "Integer"
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 0
     },
     "nullable": [
       false,
       false,
       false,
-      false,
-      false,
-      false,
-      false,
-      true
+      true,
+      true,
+      false
     ]
   },
-  "hash": "a8a2709c4f53a9d63a6a7f1bc2483fefb9482b5ee058c74358d601bab2d77707"
+  "hash": "8131e82563c394fa4c1f2f360ab998735597399501cd6886f70f19d6c6a5b657"
 }

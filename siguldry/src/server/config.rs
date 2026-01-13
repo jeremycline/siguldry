@@ -100,7 +100,7 @@ pub struct Pkcs11Binding {
     /// database is migrated from one to the other.
     ///
     /// In production it's strongly recommended that the key is in a hardware token (Yubikey, TPM, etc).
-    /// For testing and development, SoftHSMv2 can be used.
+    /// For testing and development, a software token like Kryoptic can be used.
     pub private_key: Option<String>,
     /// The PIN to access the private key.
     ///

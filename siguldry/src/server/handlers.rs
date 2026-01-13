@@ -30,7 +30,7 @@ use crate::{
     },
     server::{
         Config, crypto,
-        db::{self, KeyLocation, User},
+        db::{self, KeyPurpose, User},
     },
 };
 
@@ -57,7 +57,7 @@ pub(crate) async fn list_users(conn: &mut SqliteConnection) -> Result<Response, 
 pub(crate) async fn list_keys(conn: &mut SqliteConnection) -> Result<Response, ServerError> {
     let mut keys = vec![];
     for key in db::Key::list(conn).await? {
-        let certificates = if key.key_location == KeyLocation::SequoiaSoftkey {
+        let certificates = if key.key_purpose == KeyPurpose::PGP {
             let cert = sequoia_openpgp::Cert::from_bytes(&key.key_material.as_bytes())?;
             let version = cert.primary_key().key().version();
             let fingerprint = cert.fingerprint().to_hex();
@@ -93,7 +93,7 @@ pub(crate) async fn public_key(
     key_name: String,
 ) -> Result<Response, ServerError> {
     let key = db::Key::get(conn, &key_name).await?;
-    let certificates = if key.key_location == KeyLocation::SequoiaSoftkey {
+    let certificates = if key.key_purpose == KeyPurpose::PGP {
         let cert = sequoia_openpgp::Cert::from_bytes(&key.key_material.as_bytes())?;
         let version = cert.primary_key().key().version();
         let fingerprint = cert.fingerprint().to_hex();
@@ -145,7 +145,7 @@ pub(crate) async fn unlock(
         &key_access.encrypted_passphrase,
     )
     .await?;
-    if key.key_location != KeyLocation::SequoiaSoftkey {
+    if key.key_purpose != KeyPurpose::PGP {
         let mut temp_builder = tempfile::Builder::new();
         let f = temp_builder
             .permissions(Permissions::from_mode(0o700))
@@ -250,13 +250,12 @@ async fn private_sign_prehashed(
     let (key_path, key_password) = key_passwords
         .get(key_name)
         .ok_or_else(|| anyhow!("You need to unlock the key"))?;
-    let key_path = match key.key_location {
-        KeyLocation::Pkcs11 => Ok(key.handle),
-        KeyLocation::Encrypted => key_path
+    let key_path = match key.key_purpose {
+        KeyPurpose::Signing => key_path
             .to_str()
             .map(|s| s.to_string())
             .ok_or_else(|| anyhow!("Path isn't a UTF-8 string")),
-        KeyLocation::SequoiaSoftkey => Err(anyhow!("Cannot use GPG keys with this command")),
+        KeyPurpose::PGP => Err(anyhow!("Cannot use GPG keys with this command")),
     }?;
 
     let mut signatures = Vec::with_capacity(digests.len());

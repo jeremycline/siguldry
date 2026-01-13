@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) Microsoft Corporation.
 
-use std::str::FromStr;
+use std::{path::PathBuf, str::FromStr};
 
 use anyhow::Context;
 use sqlx::{Pool, Sqlite, SqliteConnection, SqlitePool, sqlite::SqliteConnectOptions};
@@ -91,48 +91,42 @@ impl User {
 ///
 /// This enumeration matches the values in the database's `key_locations` table.
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[non_exhaustive]
-pub enum KeyLocation {
-    /// Keys accessible via PKCS11.
-    ///
-    /// It's assumed p11-kit is being used to manage pkcs11 modules. These are typically keys stored
-    /// in a hardware security module (HSM).
-    Pkcs11,
-    /// GPG keys for use with Sequoia's softkey keystore; they are encrypted by a server-generated password.
-    SequoiaSoftkey,
-    /// Keys for use with OpenSSL; they are encrypted by a server-generated password.
-    Encrypted,
+#[allow(clippy::exhaustive_enums)]
+#[doc(hidden)]
+pub enum KeyPurpose {
+    /// The key is meant to be used for PGP signatures
+    PGP,
+    /// The key is intended to be used for signing using its algorithm-specific signing scheme.
+    Signing,
 }
 
-impl KeyLocation {
+impl KeyPurpose {
     pub fn as_str(&self) -> &str {
         match self {
-            KeyLocation::Pkcs11 => "pkcs11",
-            KeyLocation::SequoiaSoftkey => "sequoia-softkey",
-            KeyLocation::Encrypted => "encrypted",
+            KeyPurpose::PGP => "PGP",
+            KeyPurpose::Signing => "Signing",
         }
     }
 }
 
-impl TryFrom<&str> for KeyLocation {
+impl TryFrom<&str> for KeyPurpose {
     type Error = anyhow::Error;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
-            "pkcs11" => Ok(Self::Pkcs11),
-            "sequoia-softkey" => Ok(Self::SequoiaSoftkey),
-            "encrypted" => Ok(Self::Encrypted),
-            _ => Err(anyhow::anyhow!("Unknown key location '{value}'!")),
+            "PGP" => Ok(Self::PGP),
+            "Signing" => Ok(Self::Signing),
+            _ => Err(anyhow::anyhow!("Unknown key purpose '{value}'!")),
         }
     }
 }
 
-impl From<String> for KeyLocation {
+impl From<String> for KeyPurpose {
     fn from(value: String) -> Self {
         // In the event that the database we're working from has been migrated to a different level
         // than the application, it's possible there's a variant we're not aware of. It's not great
         // but we really should panic and stop.
-        let msg = "The database contains key locations the application is unaware \
+        let msg = "The database contains key purposes the application is unaware \
             of; this is either an application bug, or the database migration level does not match \
             the application";
         Self::try_from(value.as_str()).expect(msg)
@@ -237,6 +231,64 @@ impl PublicKeyMaterial {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct Pkcs11Token {
+    /// The table's primary key.
+    pub id: i64,
+    /// Absolute path to the PKCS#11 module to use when accessing the token.
+    pub module_path: PathBuf,
+    /// The token's label, useful for identification purposes
+    pub label: String,
+    /// The token's manufacturer ID, useful for identification purposes
+    pub manufacturer_id: Option<String>,
+    /// The token's model, useful for identification purposes
+    pub model: Option<String>,
+    /// The token's serial number; used to find the token among all available
+    /// PKCS#11 slots managed by the given module.
+    pub serial_number: String,
+}
+
+impl Pkcs11Token {
+    #[instrument(skip(conn))]
+    pub async fn create(
+        conn: &mut SqliteConnection,
+        module_path: PathBuf,
+        label: String,
+        manufacturer_id: Option<String>,
+        model: Option<String>,
+        serial_number: String,
+    ) -> Result<Self, sqlx::Error> {
+        let module_path_str = format!("{}", module_path.display());
+        sqlx::query!(
+            "INSERT INTO pkcs11_tokens (module_path, label, manufacturer_id, model, serial_number) VALUES (?, ?, ?, ?, ?) RETURNING id",
+            module_path_str, label, manufacturer_id, model, serial_number)
+            .fetch_one(&mut *conn)
+            .await
+            .map(|record| Self {
+                id: record.id,
+                module_path,
+                label,
+                manufacturer_id,
+                model,
+                serial_number,
+            })
+    }
+
+    #[instrument(skip(conn))]
+    pub async fn get(conn: &mut SqliteConnection, id: i64) -> Result<Self, sqlx::Error> {
+        sqlx::query_as!(Self, "SELECT * FROM pkcs11_tokens WHERE id = $1;", id)
+            .fetch_one(&mut *conn)
+            .await
+    }
+
+    #[instrument(skip(conn))]
+    pub async fn list(conn: &mut SqliteConnection) -> Result<Vec<Self>, sqlx::Error> {
+        sqlx::query_as!(Self, "SELECT * FROM pkcs11_tokens;")
+            .fetch_all(&mut *conn)
+            .await
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Key {
     /// The table's primary key.
     pub id: i64,
@@ -246,18 +298,21 @@ pub struct Key {
     pub key_algorithm: KeyAlgorithm,
     /// The key location indicates where the key is stored. Keys may be stored on the filesystem
     /// or in a hardware security module.
-    pub key_location: KeyLocation,
+    pub key_purpose: KeyPurpose,
     /// This uniquely identifies a key. For example, the GPG key fingerprint, or the SHA256 sum of
     /// the public key.
     pub handle: String,
     /// The encrypted key material, or in the case of keys stored in hardware, information on how
-    /// to access the key (e.g. a PKCS11 URI).
+    /// to access the key (e.g. the key's ID within the referenced [`Pkcs11Token`]).
     ///
     /// The scheme is dependent on the type of key, but it will be a text representation
     /// (ASCII-armored, PEM-encoded, etc).
     pub key_material: String,
     /// The public key in a text-friendly encoding (ASCII-armored, PEM-encoded, etc).
     pub public_key: String,
+    /// The foreign key to the PKCS#11 token this key is stored in; if this is None the key
+    /// is stored in the SQLite database itself (encrypted, of course).
+    pub pkcs11_token_id: Option<i64>,
 }
 
 impl std::fmt::Display for Key {
@@ -267,7 +322,7 @@ impl std::fmt::Display for Key {
             "\"{}\" ({} key in {})",
             self.name,
             self.key_algorithm.as_str(),
-            self.key_location.as_str()
+            self.key_purpose.as_str()
         )
     }
 }
@@ -292,34 +347,51 @@ impl Key {
             .await
     }
 
+    pub async fn get_token_keys(
+        conn: &mut SqliteConnection,
+        token: &Pkcs11Token,
+    ) -> Result<Vec<Key>, sqlx::Error> {
+        sqlx::query_as!(
+            Key,
+            "SELECT * FROM keys WHERE pkcs11_token_id = $1;",
+            token.id
+        )
+        .fetch_all(&mut *conn)
+        .await
+    }
+
     /// Create a new key record in the database.
     ///
     /// This does not validate that the key actually exists, or that the handle is valid.
+    #[allow(clippy::too_many_arguments)]
     #[instrument(skip(conn, key_material, public_key))]
     pub async fn create(
         conn: &mut SqliteConnection,
         name: &str,
         handle: &str,
         key_algorithm: KeyAlgorithm,
-        key_location: KeyLocation,
+        key_purpose: KeyPurpose,
         key_material: &str,
         public_key: &str,
+        pkcs11_token: Option<&Pkcs11Token>,
     ) -> Result<Key, sqlx::Error> {
         let key_algorithm_str = key_algorithm.as_str();
-        let key_location_str = key_location.as_str();
+        let key_purpose_str = key_purpose.as_str();
+        let pkcs11_token_id = pkcs11_token.map(|t| t.id);
         sqlx::query!(
-            "INSERT INTO keys (name, key_algorithm, key_location, handle, key_material, public_key) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
-            name, key_algorithm_str, key_location_str, handle, key_material, public_key)
+            "INSERT INTO keys (name, key_algorithm, key_purpose, handle, key_material, public_key, pkcs11_token_id) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
+            name, key_algorithm_str, key_purpose_str, handle, key_material, public_key, pkcs11_token_id)
             .fetch_one(&mut *conn)
             .await
             .map(|record| Key {
                 id: record.id,
                 name: name.to_string(),
                 key_algorithm,
-                key_location,
+                key_purpose,
                 handle: handle.to_string(),
                 key_material: key_material.to_string(),
                 public_key: public_key.to_string(),
+                pkcs11_token_id: None,
             })
     }
 
@@ -523,25 +595,24 @@ mod tests {
 
     // Assert the KeyLocation enum aligns with the database enumeration.
     #[tokio::test]
-    async fn key_locations_match_db() -> Result<()> {
+    async fn key_purposes_match_db() -> Result<()> {
         let db_pool = pool("sqlite::memory:").await?;
         migrate(&db_pool).await?;
         let mut conn = db_pool.begin().await?;
 
-        let key_algorithms = sqlx::query("SELECT * FROM key_locations;")
+        let key_purposes = sqlx::query("SELECT * FROM key_purpose;")
             .fetch_all(&mut *conn)
             .await?
             .into_iter()
             .map(|row| {
-                let location: &str = row.get("location");
-                KeyLocation::try_from(location)
+                let purpose: &str = row.get("purpose");
+                KeyPurpose::try_from(purpose)
             })
             .collect::<Result<Vec<_>, anyhow::Error>>()?;
 
-        assert_eq!(3, key_algorithms.len());
-        assert!(key_algorithms.contains(&KeyLocation::Pkcs11));
-        assert!(key_algorithms.contains(&KeyLocation::SequoiaSoftkey));
-        assert!(key_algorithms.contains(&KeyLocation::Encrypted));
+        assert_eq!(2, key_purposes.len());
+        assert!(key_purposes.contains(&KeyPurpose::PGP));
+        assert!(key_purposes.contains(&KeyPurpose::Signing));
 
         Ok(())
     }
@@ -581,9 +652,10 @@ mod tests {
             "test-name",
             "unique-handle",
             KeyAlgorithm::P256,
-            KeyLocation::Pkcs11,
+            KeyPurpose::Signing,
             "pkcs11://something",
             "public-key",
+            None,
         )
         .await?;
 
@@ -597,15 +669,15 @@ mod tests {
         Ok(())
     }
 
-    // Keys should only be allowed to have locations from the key_locations table.
+    // Keys should only be allowed to have purposes from the key_purpose table.
     #[tokio::test]
-    async fn key_constraint_on_location() -> Result<()> {
+    async fn key_constraint_on_purpose() -> Result<()> {
         let db_pool = pool("sqlite::memory:").await?;
         migrate(&db_pool).await?;
         let mut conn = db_pool.begin().await?;
         let key_algorithm_str = KeyAlgorithm::P256.as_str();
         let result = sqlx::query(
-            "INSERT INTO keys (name, key_algorithm, key_location, handle, key_material, public_key) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO keys (name, key_algorithm, key_purpose, handle, key_material, public_key, pkcs11_token_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind("test-name")
         .bind(key_algorithm_str)
@@ -613,11 +685,12 @@ mod tests {
         .bind("unique")
         .bind("some-encrypted-key")
         .bind("some-public-key")
+        .bind("NULL")
         .fetch_one(&mut *conn)
         .await;
 
         match result {
-            Ok(_) => panic!("Database missing foreign key contraint on key_algorithm"),
+            Ok(_) => panic!("Database missing foreign key contraint on key_purpose"),
             Err(sqlx::Error::Database(error)) => {
                 assert_eq!(error.kind(), ErrorKind::ForeignKeyViolation);
             }
@@ -629,13 +702,13 @@ mod tests {
 
     // Keys should only be allowed to have types from the key_algorithms table.
     #[tokio::test]
-    async fn key_constraint_on_type() -> Result<()> {
+    async fn key_constraint_on_algorithm_type() -> Result<()> {
         let db_pool = pool("sqlite::memory:").await?;
         migrate(&db_pool).await?;
         let mut conn = db_pool.begin().await?;
-        let key_location_str = KeyLocation::SequoiaSoftkey.as_str();
+        let key_location_str = KeyPurpose::PGP.as_str();
         let result = sqlx::query(
-            "INSERT INTO keys (name, key_algorithm, key_location, handle, key_material, public_key) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO keys (name, key_algorithm, key_purpose, handle, key_material, public_key, pkcs11_token_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind("test-name")
         .bind("not-valid")
@@ -643,6 +716,7 @@ mod tests {
         .bind("unique")
         .bind("key-material")
         .bind("public-key")
+        .bind("NULL")
         .fetch_one(&mut *conn)
         .await;
 
