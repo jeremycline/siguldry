@@ -15,7 +15,9 @@ use std::{
 use anyhow::Context;
 use cryptoki::{
     context::{CInitializeArgs, CInitializeFlags, Pkcs11},
-    object::{Attribute, AttributeType, ObjectClass},
+    mechanism::Mechanism,
+    object::{Attribute, AttributeType, ObjectClass, ObjectHandle},
+    session::UserType,
     types::AuthPin,
 };
 use openssl::{
@@ -695,6 +697,7 @@ async fn import_pkcs11_token_private(
                 &key_material,
                 &pubkey_pem,
                 Some(&token),
+                Some(key_id.clone()),
             )
             .await?;
             if let Some(data) = key_info.x509_certificate_pem.clone() {
@@ -707,13 +710,12 @@ async fn import_pkcs11_token_private(
     Ok(token)
 }
 
-/// Sign a set of digests with the given key.
-pub fn sign(
+/// Sign a set of digests with a software key protected by a password.
+pub fn sign_with_softkey(
     key: &db::Key,
     password: &Password,
     digests: Vec<(DigestAlgorithm, String)>,
 ) -> anyhow::Result<Vec<protocol::json::Signature>> {
-    // TODO: This is exclusively for nonPGP soft keys
     let pkey = match key.key_algorithm {
         KeyAlgorithm::Rsa4K => password
             .map(|password| {
@@ -757,6 +759,196 @@ pub fn sign(
     Ok(signatures)
 }
 
+/// Sign digests using a key stored in a PKCS#11 token.
+pub fn sign_with_pkcs11(
+    key: &db::Key,
+    token: &db::Pkcs11Token,
+    token_pin: &AuthPin,
+    digests: Vec<(DigestAlgorithm, String)>,
+) -> anyhow::Result<Vec<protocol::json::Signature>> {
+    let pkcs11 = Pkcs11::new(&token.module_path).context("Failed to load the PKCS#11 module")?;
+    pkcs11
+        .initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK))
+        .context("Failed to initialize the PKCS#11 module")?;
+
+    let result = sign_with_pkcs11_session(&pkcs11, key, token, token_pin, digests);
+
+    // Always finalize, even on error
+    if let Err(e) = pkcs11.finalize() {
+        tracing::warn!("Failed to finalize PKCS#11 module: {e}");
+    }
+
+    result
+}
+
+fn sign_with_pkcs11_session(
+    pkcs11: &Pkcs11,
+    key: &db::Key,
+    token: &db::Pkcs11Token,
+    token_pin: &AuthPin,
+    digests: Vec<(DigestAlgorithm, String)>,
+) -> anyhow::Result<Vec<protocol::json::Signature>> {
+    // Find the slot with our token by matching serial number
+    let slot = pkcs11
+        .get_slots_with_token()?
+        .into_iter()
+        .find(|slot| {
+            pkcs11
+                .get_token_info(*slot)
+                .map(|info| info.serial_number() == token.serial_number)
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Could not find PKCS#11 token with serial number {}",
+                token.serial_number
+            )
+        })?;
+
+    let session = pkcs11
+        .open_ro_session(slot)
+        .context("Failed to open read-only session with token")?;
+    session
+        .login(UserType::User, Some(token_pin))
+        .context("Failed to login to the PKCS#11 token")?;
+
+    // Find the private key by its ID
+    let private_key = find_private_key(
+        &session,
+        key.pkcs11_key_id
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("PKCS 11 key id was missing"))?,
+    )?;
+
+    let mut signatures = Vec::with_capacity(digests.len());
+    for (algorithm, hex_hash) in digests {
+        let hash = hex::decode(&hex_hash).context("The digest provided was not valid hex")?;
+        if hash.len() != algorithm.size() {
+            return Err(anyhow::anyhow!(
+                "The specified digest algorithm is {} bytes; payload was {}",
+                algorithm.size(),
+                hash.len()
+            ));
+        }
+
+        // Select the appropriate PKCS#11 mechanism and data format based on key type
+        let (mechanism, data_to_sign) = match key.key_algorithm {
+            KeyAlgorithm::Rsa4K => {
+                // For RSA PKCS#1 v1.5 with CKM_RSA_PKCS, we need to provide DigestInfo
+                // structure (DER-encoded hash algorithm OID + hash value)
+                let digest_info = encode_digest_info(algorithm, &hash)?;
+                (Mechanism::RsaPkcs, digest_info)
+            }
+            KeyAlgorithm::P256 => {
+                // ECDSA mechanism expects raw hash bytes
+                (Mechanism::Ecdsa, hash)
+            }
+        };
+
+        let signature = session
+            .sign(&mechanism, private_key, &data_to_sign)
+            .context("PKCS#11 signing operation failed")?;
+
+        let signature = match key.key_algorithm {
+            KeyAlgorithm::Rsa4K => signature,
+            KeyAlgorithm::P256 => {
+                // Softkey signatures use OpenSSL, which return a DER-encoded signature, while PKCS #11
+                // returns the raw r and s values (refer to https://www.ietf.org/rfc/rfc6979.html#appendix-A.1.3).
+                // In order to be consistent, we'll always return the DER-encoded signature.
+                debug_assert!(
+                    signature.len() == 64,
+                    "Signature length for P256 is the wrong length"
+                );
+                let r = openssl::bn::BigNum::from_slice(&signature[..32])?;
+                let s = openssl::bn::BigNum::from_slice(&signature[32..])?;
+                let ecdsa_sig = openssl::ecdsa::EcdsaSig::from_private_components(r, s)?;
+                ecdsa_sig.to_der()?
+            }
+        };
+
+        signatures.push(protocol::json::Signature {
+            signature,
+            digest: algorithm,
+            hash: hex_hash,
+        });
+    }
+
+    Ok(signatures)
+}
+
+use asn1::{ObjectIdentifier, oid};
+
+// Algorithm identifiers for RSA PKCS v1.5 DigestInfo structures.
+// SHA OID references: https://www.ietf.org/rfc/rfc4055.html#section-6
+// SHA3 OID references: https://www.ietf.org/rfc/rfc9688.html#name-message-digest-algorithms
+const OID_SHA256: ObjectIdentifier = oid!(2, 16, 840, 1, 101, 3, 4, 2, 1);
+const OID_SHA512: ObjectIdentifier = oid!(2, 16, 840, 1, 101, 3, 4, 2, 3);
+const OID_SHA3_256: ObjectIdentifier = oid!(2, 16, 840, 1, 101, 3, 4, 2, 8);
+const OID_SHA3_512: ObjectIdentifier = oid!(2, 16, 840, 1, 101, 3, 4, 2, 10);
+
+/// Used for RSA PKCS1 v1.5 signatures.
+/// Reference: https://www.ietf.org/rfc/rfc8017.html#section-9.2
+#[derive(asn1::Asn1Write)]
+struct DigestInfo<'a> {
+    digest_algorithm: AlgorithmIdentifier,
+    digest: &'a [u8],
+}
+
+#[derive(asn1::Asn1Write)]
+struct AlgorithmIdentifier {
+    algorithm: ObjectIdentifier,
+    parameters: (),
+}
+
+/// Encode a hash into DigestInfo structure for RSA PKCS#1 v1.5 signatures.
+///
+/// DigestInfo is defined in PKCS#1 as:
+///   DigestInfo ::= SEQUENCE {
+///     digestAlgorithm AlgorithmIdentifier,
+///     digest OCTET STRING
+///   }
+fn encode_digest_info(algorithm: DigestAlgorithm, hash: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let algorithm_oid = match algorithm {
+        DigestAlgorithm::Sha256 => OID_SHA256,
+        DigestAlgorithm::Sha512 => OID_SHA512,
+        DigestAlgorithm::Sha3_256 => OID_SHA3_256,
+        DigestAlgorithm::Sha3_512 => OID_SHA3_512,
+    };
+
+    let digest_info = DigestInfo {
+        digest_algorithm: AlgorithmIdentifier {
+            algorithm: algorithm_oid,
+            parameters: (),
+        },
+        digest: hash,
+    };
+
+    asn1::write_single(&digest_info)
+        .map_err(|e| anyhow::anyhow!("Failed to encode DigestInfo: {e}"))
+}
+
+/// Find a private key in the PKCS#11 session by its ID attribute.
+fn find_private_key(
+    session: &cryptoki::session::Session,
+    key_id: &[u8],
+) -> anyhow::Result<ObjectHandle> {
+    let search_template = [
+        Attribute::Class(ObjectClass::PRIVATE_KEY),
+        Attribute::Id(key_id.to_vec()),
+    ];
+
+    let objects: Vec<ObjectHandle> = session
+        .find_objects(&search_template)
+        .context("Failed to search for private key in PKCS#11 token")?;
+
+    objects.into_iter().next().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Private key with ID {:02X?} not found in PKCS#11 token",
+            key_id
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::process::Command;
@@ -766,6 +958,7 @@ mod tests {
     use tempfile::{NamedTempFile, TempDir};
 
     use super::*;
+    use crate::protocol::DigestAlgorithm;
 
     // Generated passwords should be base64 encoded and 128 bytes of randomness.
     #[test]
@@ -843,8 +1036,9 @@ mod tests {
 
     #[derive(Debug)]
     struct Hsm {
-        _directory: TempDir,
+        directory: TempDir,
         bindings: Vec<Pkcs11Binding>,
+        user_pin: AuthPin,
     }
 
     // Set up a temporary PKCS#11 token.
@@ -1010,7 +1204,7 @@ mod tests {
             .output()?;
         if !output.status.success() {
             panic!(
-                "Failed to add cert to SoftHSM token: {:?}",
+                "Failed to add cert to PKCS 11 token: {:?}",
                 String::from_utf8_lossy(&output.stderr)
             );
         }
@@ -1050,8 +1244,9 @@ mod tests {
         }
 
         Ok(Hsm {
-            _directory: hsm_dir,
+            directory: hsm_dir,
             bindings,
+            user_pin,
         })
     }
 
@@ -1145,7 +1340,7 @@ mod tests {
 
     #[tokio::test]
     async fn import_pkcs11_keys() -> Result<()> {
-        let _hsm = setup_hsm()?;
+        let hsm = setup_hsm()?;
         let db_pool = db::pool("sqlite::memory:", false).await?;
         db::migrate(&db_pool).await?;
         let mut conn = db_pool.begin().await?;
@@ -1153,7 +1348,7 @@ mod tests {
         super::import_pkcs11_token(
             &mut conn,
             PathBuf::from("/usr/lib64/pkcs11/libkryoptic_pkcs11.so"),
-            AuthPin::new("secret-password".into()),
+            hsm.user_pin.clone(),
         )
         .await?;
 
@@ -1172,6 +1367,296 @@ mod tests {
                 assert_eq!(certs.len(), 0);
             }
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sign_with_pkcs11_rsa_key() -> Result<()> {
+        let hsm = setup_hsm()?;
+        let db_pool = db::pool("sqlite::memory:", false).await?;
+        db::migrate(&db_pool).await?;
+        let mut conn = db_pool.begin().await?;
+
+        let token = super::import_pkcs11_token(
+            &mut conn,
+            PathBuf::from("/usr/lib64/pkcs11/libkryoptic_pkcs11.so"),
+            hsm.user_pin.clone(),
+        )
+        .await?;
+
+        let keys = db::Key::list(&mut conn).await?;
+        let rsa_key = keys
+            .iter()
+            .find(|k| k.key_algorithm == KeyAlgorithm::Rsa4K)
+            .expect("Should have an RSA key");
+
+        let data = b"test data";
+        let digest = openssl::hash::hash(openssl::hash::MessageDigest::sha256(), data)?;
+        let hex_hash = hex::encode(&digest);
+        let signatures = super::sign_with_pkcs11(
+            rsa_key,
+            &token,
+            &hsm.user_pin,
+            vec![(DigestAlgorithm::Sha256, hex_hash.clone())],
+        )?;
+        assert_eq!(signatures.len(), 1);
+        assert_eq!(signatures[0].digest, DigestAlgorithm::Sha256);
+        assert_eq!(signatures[0].hash, hex_hash);
+        assert!(!signatures[0].signature.is_empty());
+
+        // Verify the signature using the public key via OpenSSL Rust bindings
+        let public_key = openssl::pkey::PKey::public_key_from_pem(rsa_key.public_key.as_bytes())?;
+        let mut ctx = openssl::pkey_ctx::PkeyCtx::new(&public_key)?;
+        ctx.verify_init()?;
+        ctx.set_signature_md(openssl::md::Md::sha256())?;
+        ctx.set_rsa_padding(openssl::rsa::Padding::PKCS1)?;
+        let result = ctx.verify(&digest, &signatures[0].signature)?;
+        assert!(result, "Signature should be valid (OpenSSL bindings)");
+
+        // Also verify using the OpenSSL CLI
+        let data_path = hsm.directory.path().join("unsigned_data");
+        let signature_path = hsm.directory.path().join("signature.bin");
+        let pubkey_path = hsm.directory.path().join("pubkey.pem");
+        std::fs::write(&data_path, data)?;
+        std::fs::write(&signature_path, &signatures[0].signature)?;
+        std::fs::write(&pubkey_path, rsa_key.public_key.as_bytes())?;
+        let output = Command::new("openssl")
+            .args(["dgst", "-sha256", "-verify"])
+            .arg(&pubkey_path)
+            .arg("-signature")
+            .arg(&signature_path)
+            .arg(&data_path)
+            .output()?;
+
+        assert!(
+            output.status.success(),
+            "OpenSSL CLI verification failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sign_with_pkcs11_ecc_key() -> Result<()> {
+        let hsm = setup_hsm()?;
+        let db_pool = db::pool("sqlite::memory:", false).await?;
+        db::migrate(&db_pool).await?;
+        let mut conn = db_pool.begin().await?;
+
+        let token = super::import_pkcs11_token(
+            &mut conn,
+            PathBuf::from("/usr/lib64/pkcs11/libkryoptic_pkcs11.so"),
+            hsm.user_pin.clone(),
+        )
+        .await?;
+
+        let keys = db::Key::list(&mut conn).await?;
+        let ecc_key = keys
+            .iter()
+            .find(|k| k.key_algorithm == KeyAlgorithm::P256)
+            .expect("Should have an ECC key");
+
+        // Create a test digest (SHA256 of "test data")
+        let data = b"test data";
+        let digest = openssl::hash::hash(openssl::hash::MessageDigest::sha256(), data)?;
+        let hex_hash = hex::encode(&digest);
+
+        let token_pin = AuthPin::new("secret-password".into());
+        let signatures = super::sign_with_pkcs11(
+            ecc_key,
+            &token,
+            &token_pin,
+            vec![(DigestAlgorithm::Sha256, hex_hash.clone())],
+        )?;
+
+        assert_eq!(signatures.len(), 1);
+        assert_eq!(signatures[0].digest, DigestAlgorithm::Sha256);
+        assert_eq!(signatures[0].hash, hex_hash);
+        assert!(!signatures[0].signature.is_empty());
+
+        let public_key = openssl::pkey::PKey::public_key_from_pem(ecc_key.public_key.as_bytes())?;
+        let ec_key = public_key.ec_key()?;
+        let ecdsa_sig = openssl::ecdsa::EcdsaSig::from_der(&signatures[0].signature)?;
+        assert!(
+            ecdsa_sig.verify(&digest, &ec_key)?,
+            "ECDSA signature should be valid (OpenSSL bindings)"
+        );
+
+        // Also verify using the OpenSSL CLI
+        let data_path = hsm.directory.path().join("unsigned_data");
+        let signature_path = hsm.directory.path().join("signature.bin");
+        let pubkey_path = hsm.directory.path().join("pubkey.pem");
+        std::fs::write(&data_path, data)?;
+        std::fs::write(&signature_path, &signatures[0].signature)?;
+        std::fs::write(&pubkey_path, ecc_key.public_key.as_bytes())?;
+        let output = Command::new("openssl")
+            .args(["dgst", "-sha256", "-verify"])
+            .arg(&pubkey_path)
+            .arg("-signature")
+            .arg(&signature_path)
+            .arg(&data_path)
+            .output()?;
+
+        assert!(
+            output.status.success(),
+            "OpenSSL CLI verification failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn sign_with_softkey_rsa() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let key_password = Password::from("test-key-password");
+
+        // Generate an RSA key pair
+        let rsa = Rsa::generate(4096)?;
+        let pkey = PKey::from_rsa(rsa)?;
+        let public_key_pem = String::from_utf8(pkey.public_key_to_pem()?)?;
+        let private_key_pem = key_password.map(|password| {
+            pkey.private_key_to_pem_pkcs8_passphrase(Cipher::aes_256_cbc(), password)
+        })?;
+        let private_key_pem = String::from_utf8(private_key_pem)?;
+
+        // Create a db::Key struct for the softkey
+        let key = db::Key {
+            id: 1,
+            name: "test-rsa-softkey".to_string(),
+            key_algorithm: KeyAlgorithm::Rsa4K,
+            key_purpose: db::KeyPurpose::Signing,
+            handle: "test-handle".to_string(),
+            key_material: private_key_pem,
+            public_key: public_key_pem.clone(),
+            pkcs11_token_id: None,
+            pkcs11_key_id: None,
+        };
+
+        // Create test data and sign it
+        let data = b"test data for RSA softkey signing";
+        let digest = openssl::hash::hash(openssl::hash::MessageDigest::sha256(), data)?;
+        let hex_hash = hex::encode(&digest);
+
+        let signatures = super::sign_with_softkey(
+            &key,
+            &key_password,
+            vec![(DigestAlgorithm::Sha256, hex_hash.clone())],
+        )?;
+
+        assert_eq!(signatures.len(), 1);
+        assert_eq!(signatures[0].digest, DigestAlgorithm::Sha256);
+        assert_eq!(signatures[0].hash, hex_hash);
+        assert!(!signatures[0].signature.is_empty());
+
+        // Verify the signature using OpenSSL Rust bindings
+        let public_key = openssl::pkey::PKey::public_key_from_pem(key.public_key.as_bytes())?;
+        let mut ctx = openssl::pkey_ctx::PkeyCtx::new(&public_key)?;
+        ctx.verify_init()?;
+        ctx.set_signature_md(openssl::md::Md::sha256())?;
+        ctx.set_rsa_padding(openssl::rsa::Padding::PKCS1)?;
+        let result = ctx.verify(&digest, &signatures[0].signature)?;
+        assert!(result, "Signature should be valid (OpenSSL bindings)");
+
+        // Also verify using the OpenSSL CLI
+        let data_path = temp_dir.path().join("unsigned_data");
+        let signature_path = temp_dir.path().join("signature.bin");
+        let pubkey_path = temp_dir.path().join("pubkey.pem");
+        std::fs::write(&data_path, data)?;
+        std::fs::write(&signature_path, &signatures[0].signature)?;
+        std::fs::write(&pubkey_path, key.public_key.as_bytes())?;
+        let output = Command::new("openssl")
+            .args(["dgst", "-sha256", "-verify"])
+            .arg(&pubkey_path)
+            .arg("-signature")
+            .arg(&signature_path)
+            .arg(&data_path)
+            .output()?;
+
+        assert!(
+            output.status.success(),
+            "OpenSSL CLI verification failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn sign_with_softkey_ecc() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let key_password = Password::from("test-key-password");
+
+        // Generate a P-256 EC key pair
+        let ec_group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)?;
+        let ec_key = EcKey::generate(&ec_group)?;
+        let pkey = PKey::from_ec_key(ec_key)?;
+        let public_key_pem = String::from_utf8(pkey.public_key_to_pem()?)?;
+        let private_key_pem = key_password.map(|password| {
+            pkey.private_key_to_pem_pkcs8_passphrase(Cipher::aes_256_cbc(), password)
+        })?;
+        let private_key_pem = String::from_utf8(private_key_pem)?;
+
+        // Create a db::Key struct for the softkey
+        let key = db::Key {
+            id: 1,
+            name: "test-ecc-softkey".to_string(),
+            key_algorithm: KeyAlgorithm::P256,
+            key_purpose: db::KeyPurpose::Signing,
+            handle: "test-handle".to_string(),
+            key_material: private_key_pem,
+            public_key: public_key_pem.clone(),
+            pkcs11_token_id: None,
+            pkcs11_key_id: None,
+        };
+
+        // Create test data and sign it
+        let data = b"test data for ECC softkey signing";
+        let digest = openssl::hash::hash(openssl::hash::MessageDigest::sha256(), data)?;
+        let hex_hash = hex::encode(&digest);
+
+        let signatures = super::sign_with_softkey(
+            &key,
+            &key_password,
+            vec![(DigestAlgorithm::Sha256, hex_hash.clone())],
+        )?;
+
+        assert_eq!(signatures.len(), 1);
+        assert_eq!(signatures[0].digest, DigestAlgorithm::Sha256);
+        assert_eq!(signatures[0].hash, hex_hash);
+        assert!(!signatures[0].signature.is_empty());
+
+        let public_key = openssl::pkey::PKey::public_key_from_pem(key.public_key.as_bytes())?;
+        let ec_key = public_key.ec_key()?;
+        let ecdsa_sig = openssl::ecdsa::EcdsaSig::from_der(&signatures[0].signature)?;
+        assert!(
+            ecdsa_sig.verify(&digest, &ec_key)?,
+            "ECDSA signature should be valid (OpenSSL bindings)"
+        );
+
+        // Also verify using the OpenSSL CLI
+        // OpenSSL's PkeyCtx produces DER-encoded signatures, which the CLI expects
+        let data_path = temp_dir.path().join("unsigned_data");
+        let signature_path = temp_dir.path().join("signature.bin");
+        let pubkey_path = temp_dir.path().join("pubkey.pem");
+        std::fs::write(&data_path, data)?;
+        std::fs::write(&signature_path, &signatures[0].signature)?;
+        std::fs::write(&pubkey_path, key.public_key.as_bytes())?;
+        let output = Command::new("openssl")
+            .args(["dgst", "-sha256", "-verify"])
+            .arg(&pubkey_path)
+            .arg("-signature")
+            .arg(&signature_path)
+            .arg(&data_path)
+            .output()?;
+
+        assert!(
+            output.status.success(),
+            "OpenSSL CLI verification failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
 
         Ok(())
     }

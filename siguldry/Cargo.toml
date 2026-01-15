@@ -28,6 +28,9 @@ sigul-client = []
 [dependencies.anyhow]
 version = "1"
 
+[dependencies.asn1]
+version = "0.23"
+
 [dependencies.bytes]
 version = "1"
 

@@ -170,6 +170,7 @@ pub async fn manage(command: ManagementCommands, config: Config) -> anyhow::Resu
                     &armored_private_key,
                     &public_key,
                     None,
+                    None,
                 )
                 .await?;
                 db::KeyAccess::create(
@@ -220,6 +221,7 @@ pub async fn manage(command: ManagementCommands, config: Config) -> anyhow::Resu
                     db::KeyPurpose::Signing,
                     &private_key,
                     &public_key,
+                    None,
                     None,
                 )
                 .await?;

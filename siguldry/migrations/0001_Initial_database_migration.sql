@@ -34,6 +34,9 @@ CREATE TABLE IF NOT EXISTS "keys" (
     -- The public key in a text-friendly encoding (ASCII-armored, PEM-encoded, etc)
     "public_key" TEXT NOT NULL,
     "pkcs11_token_id" INTEGER,
+    -- The Id attribute of the key within the token
+    "pkcs11_key_id" BLOB,
+    CHECK ( (pkcs11_token_id IS NULL) = (pkcs11_key_id IS NULL) ),
     FOREIGN KEY(key_algorithm) REFERENCES key_algorithms(type) ON DELETE RESTRICT,
     FOREIGN KEY(key_purpose) REFERENCES key_purpose(purpose) ON DELETE RESTRICT,
     -- If a token is removed, delete all associated keys.

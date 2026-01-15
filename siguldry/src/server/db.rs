@@ -316,6 +316,10 @@ pub struct Key {
     /// The foreign key to the PKCS#11 token this key is stored in; if this is None the key
     /// is stored in the SQLite database itself (encrypted, of course).
     pub pkcs11_token_id: Option<i64>,
+    /// The key's Id attribute within the PKCS #11 token; this has a check constraint so both
+    /// it and `pkcs11_token_id` must be set (or both be NULL). To be clear, this is _NOT_ a
+    /// foreign key, the Id attribute is a PKCS #11 concept.
+    pub pkcs11_key_id: Option<Vec<u8>>,
 }
 
 impl std::fmt::Display for Key {
@@ -377,13 +381,14 @@ impl Key {
         key_material: &str,
         public_key: &str,
         pkcs11_token: Option<&Pkcs11Token>,
+        pkcs11_key_id: Option<Vec<u8>>,
     ) -> Result<Key, sqlx::Error> {
         let key_algorithm_str = key_algorithm.as_str();
         let key_purpose_str = key_purpose.as_str();
         let pkcs11_token_id = pkcs11_token.map(|t| t.id);
         sqlx::query!(
-            "INSERT INTO keys (name, key_algorithm, key_purpose, handle, key_material, public_key, pkcs11_token_id) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
-            name, key_algorithm_str, key_purpose_str, handle, key_material, public_key, pkcs11_token_id)
+            "INSERT INTO keys (name, key_algorithm, key_purpose, handle, key_material, public_key, pkcs11_token_id, pkcs11_key_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+            name, key_algorithm_str, key_purpose_str, handle, key_material, public_key, pkcs11_token_id, pkcs11_key_id)
             .fetch_one(&mut *conn)
             .await
             .map(|record| Key {
@@ -394,7 +399,8 @@ impl Key {
                 handle: handle.to_string(),
                 key_material: key_material.to_string(),
                 public_key: public_key.to_string(),
-                pkcs11_token_id: None,
+                pkcs11_token_id,
+                pkcs11_key_id,
             })
     }
 
@@ -659,6 +665,7 @@ mod tests {
             "pkcs11://something",
             "public-key",
             None,
+            None,
         )
         .await?;
 
@@ -680,7 +687,7 @@ mod tests {
         let mut conn = db_pool.begin().await?;
         let key_algorithm_str = KeyAlgorithm::P256.as_str();
         let result = sqlx::query(
-            "INSERT INTO keys (name, key_algorithm, key_purpose, handle, key_material, public_key, pkcs11_token_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO keys (name, key_algorithm, key_purpose, handle, key_material, public_key, pkcs11_token_id, pkcs11_key_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind("test-name")
         .bind(key_algorithm_str)
@@ -688,6 +695,7 @@ mod tests {
         .bind("unique")
         .bind("some-encrypted-key")
         .bind("some-public-key")
+        .bind("NULL")
         .bind("NULL")
         .fetch_one(&mut *conn)
         .await;
@@ -711,7 +719,7 @@ mod tests {
         let mut conn = db_pool.begin().await?;
         let key_location_str = KeyPurpose::PGP.as_str();
         let result = sqlx::query(
-            "INSERT INTO keys (name, key_algorithm, key_purpose, handle, key_material, public_key, pkcs11_token_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO keys (name, key_algorithm, key_purpose, handle, key_material, public_key, pkcs11_token_id, pkcs11_key_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind("test-name")
         .bind("not-valid")
@@ -719,6 +727,7 @@ mod tests {
         .bind("unique")
         .bind("key-material")
         .bind("public-key")
+        .bind("NULL")
         .bind("NULL")
         .fetch_one(&mut *conn)
         .await;

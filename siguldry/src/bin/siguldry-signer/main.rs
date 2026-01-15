@@ -11,6 +11,7 @@ use std::{collections::HashMap, io::Write, path::PathBuf};
 
 use anyhow::{Context, anyhow};
 use clap::Parser;
+use cryptoki::types::AuthPin;
 use sequoia_openpgp::{
     KeyHandle,
     crypto::Password,
@@ -251,7 +252,17 @@ async fn sign(
         .get(key_name)
         .ok_or_else(|| anyhow!("You need to unlock the key"))?;
 
-    let signatures = crypto::sign(&key, password, digests)?;
+    let signatures = if let Some(token_id) = key.pkcs11_token_id {
+        // For PKCS#11 keys, fetch the token information and use the configured PIN
+        let token = db::Pkcs11Token::get(conn, token_id).await?;
+        let pin = password
+            .map(|p| String::from_utf8(p.to_vec()))
+            .map(AuthPin::from)?;
+        crypto::sign_with_pkcs11(&key, &token, &pin, digests)?
+    } else {
+        crypto::sign_with_softkey(&key, password, digests)?
+    };
+
     Ok(signatures)
 }
 
