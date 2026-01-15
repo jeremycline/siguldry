@@ -4,6 +4,12 @@
 use std::{path::PathBuf, str::FromStr};
 
 use anyhow::Context;
+use cryptoki::{
+    context::{CInitializeArgs, CInitializeFlags, Pkcs11},
+    object::{Attribute, ObjectClass, ObjectHandle},
+    session::Session,
+    types::AuthPin,
+};
 use sqlx::{Pool, Sqlite, SqliteConnection, SqlitePool, sqlite::SqliteConnectOptions};
 use tracing::instrument;
 
@@ -289,6 +295,49 @@ impl Pkcs11Token {
             .fetch_all(&mut *conn)
             .await
     }
+
+    /// Initialize the PKCS#11 module.
+    ///
+    /// The caller must finalize it.
+    pub fn intialize(&self) -> anyhow::Result<Pkcs11> {
+        let pkcs11 = Pkcs11::new(&self.module_path).context("Failed to load the PKCS#11 module")?;
+        pkcs11
+            .initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK))
+            .context("Failed to initialize the PKCS#11 module")?;
+
+        Ok(pkcs11)
+    }
+
+    /// Open a read-only session with the token.
+    ///
+    /// The caller must have initialized the provided `pkcs11` module.
+    #[instrument(skip_all)]
+    pub fn pkcs11_session(&self, pkcs11: &Pkcs11, token_pin: &AuthPin) -> anyhow::Result<Session> {
+        // Find the slot with our token by matching serial number
+        let slot = pkcs11
+            .get_slots_with_token()?
+            .into_iter()
+            .find(|slot| {
+                pkcs11
+                    .get_token_info(*slot)
+                    .map(|info| info.serial_number() == self.serial_number)
+                    .unwrap_or(false)
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Could not find PKCS#11 token with serial number {}",
+                    self.serial_number
+                )
+            })?;
+
+        let session = pkcs11
+            .open_ro_session(slot)
+            .context("Failed to open read-only session with token")?;
+        session
+            .login(cryptoki::session::UserType::User, Some(token_pin))
+            .context("Failed to login to the PKCS#11 token")?;
+        Ok(session)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -413,6 +462,28 @@ impl Key {
             .execute(&mut *conn)
             .await
             .map(|result| result.rows_affected())
+    }
+
+    pub fn get_pkcs11_private_key(&self, session: &Session) -> anyhow::Result<ObjectHandle> {
+        let key_id = self
+            .pkcs11_key_id
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("This key does not have a PKCS#11 Id attribute"))?;
+        let search_template = [
+            Attribute::Class(ObjectClass::PRIVATE_KEY),
+            Attribute::Id(key_id.to_vec()),
+        ];
+
+        let objects: Vec<ObjectHandle> = session
+            .find_objects(&search_template)
+            .context("Failed to search for private key in PKCS#11 token")?;
+
+        objects.into_iter().next().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Private key with ID {:02X?} not found in PKCS#11 token",
+                key_id
+            )
+        })
     }
 }
 

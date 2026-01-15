@@ -19,7 +19,7 @@ use siguldry::{
     protocol::KeyAlgorithm,
     server::{
         Config,
-        crypto::{self, create_encrypted_key, decrypt_key_password},
+        crypto::{self, binding::decrypt_key_password},
         db,
     },
 };
@@ -212,7 +212,7 @@ pub async fn manage(command: ManagementCommands, config: Config) -> anyhow::Resu
                 )?;
 
                 let (handle, encrypted_password, private_key, public_key) =
-                    create_encrypted_key(&config, user_password, algorithm)?;
+                    crypto::create_encrypted_key(&config, user_password, algorithm)?;
                 let key = db::Key::create(
                     &mut conn,
                     &name,
@@ -457,13 +457,14 @@ pub async fn manage(command: ManagementCommands, config: Config) -> anyhow::Resu
                     ))?;
                     prompt.prompt()
                 }?;
-                let encrypted_passphrase = crypto::encrypt_key_password(
+                let encrypted_passphrase = crypto::binding::encrypt_key_password(
                     &config.pkcs11_bindings,
                     user_password,
                     key_password,
                 )?;
 
-                let token = crypto::import_pkcs11_token(&mut conn, module, token_user_pin).await?;
+                let token =
+                    crypto::token::import_pkcs11_token(&mut conn, module, token_user_pin).await?;
                 let keys = db::Key::get_token_keys(&mut conn, &token).await?;
                 for key in keys {
                     db::KeyAccess::create(
@@ -1360,14 +1361,14 @@ mod tests {
         let user = db::User::get(&mut conn, "admin").await?;
         for key in db::Key::list(&mut conn).await? {
             let key_access = db::KeyAccess::get(&mut conn, &key, &user).await?;
-            let result = siguldry::server::crypto::decrypt_key_password(
+            let result = siguldry::server::crypto::binding::decrypt_key_password(
                 &test.config().pkcs11_bindings,
                 Password::from("first-line-password\nsecond-line\nthird-line\n"),
                 &key_access.encrypted_passphrase,
             )
             .await;
             assert!(result.is_err());
-            let _ = siguldry::server::crypto::decrypt_key_password(
+            let _ = siguldry::server::crypto::binding::decrypt_key_password(
                 &test.config().pkcs11_bindings,
                 Password::from("first-line-password"),
                 &key_access.encrypted_passphrase,

@@ -448,6 +448,10 @@ pub mod json {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Signature {
         /// The signature. This is base64-encoded in the JSON objects.
+        ///
+        /// The structure of the signature is dependent on the key used in the signature.
+        /// For RSA keys, the signature is an RSA PKCS#1 v1.5 structure. For P-256 keys,
+        /// it is the DER-encoded R and S values in a format OpenSSL would emit.
         #[serde(with = "base64")]
         pub signature: Vec<u8>,
         /// The digest algorithm used on the payload.

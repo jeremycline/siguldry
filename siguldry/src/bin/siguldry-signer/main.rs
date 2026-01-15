@@ -230,7 +230,7 @@ async fn unlock(
 ) -> anyhow::Result<()> {
     let key = db::Key::get(conn, &key_name).await?;
     let key_access = db::KeyAccess::get(conn, &key, user).await?;
-    let password = crypto::decrypt_key_password(
+    let password = crypto::binding::decrypt_key_password(
         &config.pkcs11_bindings,
         user_password,
         &key_access.encrypted_passphrase,
@@ -254,13 +254,18 @@ async fn sign(
 
     let signatures = if let Some(token_id) = key.pkcs11_token_id {
         // For PKCS#11 keys, fetch the token information and use the configured PIN
+        // TODO: don't initialize/uninitialize over and over, keep a session going
         let token = db::Pkcs11Token::get(conn, token_id).await?;
+        let pkcs11 = token.intialize()?;
         let pin = password
             .map(|p| String::from_utf8(p.to_vec()))
             .map(AuthPin::from)?;
-        crypto::sign_with_pkcs11(&key, &token, &pin, digests)?
+        let session = token.pkcs11_session(&pkcs11, &pin)?;
+        let result = crypto::signing::sign_with_pkcs11(&key, &session, digests);
+        pkcs11.finalize()?;
+        result?
     } else {
-        crypto::sign_with_softkey(&key, password, digests)?
+        crypto::signing::sign_with_softkey(&key, password, digests)?
     };
 
     Ok(signatures)
