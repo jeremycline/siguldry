@@ -212,7 +212,11 @@ pub async fn manage(command: ManagementCommands, config: Config) -> anyhow::Resu
                 )?;
 
                 let (handle, encrypted_password, private_key, public_key) =
-                    crypto::create_encrypted_key(&config, user_password, algorithm)?;
+                    crypto::create_encrypted_key(
+                        &config.pkcs11_bindings,
+                        user_password,
+                        algorithm,
+                    )?;
                 let key = db::Key::create(
                     &mut conn,
                     &name,
@@ -573,6 +577,7 @@ mod tests {
             // SAFETY: Tests must run with nextest (one process per test)
             unsafe {
                 std::env::set_var("KRYOPTIC_CONF", &hsm_config_path);
+                std::env::set_var("PKCS11_PROVIDER_MODULE", module_path);
             }
 
             let pkcs11 = Pkcs11::new(module_path)
@@ -617,13 +622,10 @@ mod tests {
                     ],
                 )?;
 
-                // Create a P-256 key pair
-                let p256_oid = openssl::asn1::Asn1Object::from_str("1.2.840.10045.3.1.7")
-                    .expect("Valid NIST P-256 OID");
-                let oid_content = p256_oid.as_slice();
-                let mut p256_oid_bytes: Vec<u8> = vec![0x06, oid_content.len() as u8];
-                p256_oid_bytes.extend_from_slice(oid_content);
-
+                // Annoyingly it doesn't seem possible to convert a named curve Nid to ASN.1 in
+                // OpenSSL, so we manually create it from the OID for NIST P-256.
+                let p256_oid = asn1::oid!(1, 2, 840, 10045, 3, 1, 7);
+                let p256_oid_bytes = asn1::write_single(&p256_oid).unwrap();
                 session.generate_key_pair(
                     &Mechanism::EccKeyPairGen,
                     &[
@@ -738,7 +740,7 @@ mod tests {
         let test = TestConfig::new(false).await?;
         test.migrate().await?;
 
-        // Deleting a nonexistent user should succeed (0 rows affected)
+        // TODO: should this return non-zero?
         manage(
             ManagementCommands::Users(UserCommands::Delete {
                 name: "nonexistent".to_string(),
@@ -862,9 +864,8 @@ mod tests {
         test.create_user("admin").await?;
 
         let password_file = test.temp_dir.path().join("password.txt");
-        std::fs::write(&password_file, "test-password-long-enough\n")?;
+        std::fs::write(&password_file, "test-password\n")?;
 
-        // Create a CA key
         manage(
             ManagementCommands::Key(KeyCommands::Create {
                 algorithm: KeyAlgorithm::Rsa4K,
@@ -875,7 +876,6 @@ mod tests {
             test.config().clone(),
         )
         .await?;
-
         manage(
             ManagementCommands::Key(KeyCommands::X509 {
                 user_name: "admin".to_string(),
@@ -964,11 +964,9 @@ mod tests {
 
         let password_file = test.temp_dir.path().join("password.txt");
         std::fs::write(&password_file, "correct-password\n")?;
-
         let wrong_password_file = test.temp_dir.path().join("wrong_password.txt");
-        std::fs::write(&wrong_password_file, "wrong-password!!\n")?;
+        std::fs::write(&wrong_password_file, "wrong-password\n")?;
 
-        // Create a key
         manage(
             ManagementCommands::Key(KeyCommands::Create {
                 algorithm: KeyAlgorithm::Rsa4K,
@@ -979,7 +977,6 @@ mod tests {
             test.config().clone(),
         )
         .await?;
-
         let result = manage(
             ManagementCommands::Key(KeyCommands::X509 {
                 user_name: "admin".to_string(),
@@ -993,8 +990,8 @@ mod tests {
             test.config().clone(),
         )
         .await;
-
         assert!(result.is_err());
+
         Ok(())
     }
 
@@ -1030,8 +1027,8 @@ mod tests {
             test.config().clone(),
         )
         .await;
-
         assert!(result.is_err());
+
         Ok(())
     }
 
@@ -1042,7 +1039,7 @@ mod tests {
         test.create_user("gpg-admin").await?;
 
         let password_file = test.temp_dir.path().join("password.txt");
-        std::fs::write(&password_file, "gpg-password-long\n")?;
+        std::fs::write(&password_file, "gpg-password\n")?;
 
         manage(
             ManagementCommands::Gpg(GpgCommands::Create {
@@ -1077,8 +1074,8 @@ mod tests {
             test.config().clone(),
         )
         .await;
-
         assert!(result.is_err());
+
         Ok(())
     }
 
@@ -1100,8 +1097,8 @@ mod tests {
             test.config().clone(),
         )
         .await;
-
         assert!(result.is_err());
+
         Ok(())
     }
 
@@ -1111,9 +1108,7 @@ mod tests {
 
         let db_path = test.config().database();
         assert!(!db_path.exists());
-
         manage(ManagementCommands::Migrate {}, test.config().clone()).await?;
-
         assert!(db_path.exists());
 
         Ok(())
@@ -1138,7 +1133,6 @@ mod tests {
 
         let user_pin_file = test.temp_dir.path().join("user_pin.txt");
         std::fs::write(&user_pin_file, format!("{}\n", test.user_pin))?;
-
         let password_file = test.temp_dir.path().join("password.txt");
         std::fs::write(&password_file, "key-access-password\n")?;
 
@@ -1163,7 +1157,6 @@ mod tests {
 
         let user_pin_file = test.temp_dir.path().join("user_pin.txt");
         std::fs::write(&user_pin_file, format!("{}\n", test.user_pin))?;
-
         let password_file = test.temp_dir.path().join("password.txt");
         std::fs::write(&password_file, "key-access-password\n")?;
 
@@ -1177,8 +1170,8 @@ mod tests {
             test.config().clone(),
         )
         .await;
-
         assert!(result.is_err());
+
         Ok(())
     }
 
@@ -1191,7 +1184,6 @@ mod tests {
 
         let user_pin_file = test.temp_dir.path().join("user_pin.txt");
         std::fs::write(&user_pin_file, "wrong-pin\n")?;
-
         let password_file = test.temp_dir.path().join("password.txt");
         std::fs::write(&password_file, "key-access-password\n")?;
 
@@ -1205,8 +1197,8 @@ mod tests {
             test.config().clone(),
         )
         .await;
-
         assert!(result.is_err());
+
         Ok(())
     }
 
@@ -1218,7 +1210,6 @@ mod tests {
 
         let user_pin_file = test.temp_dir.path().join("user_pin.txt");
         std::fs::write(&user_pin_file, "pin\n")?;
-
         let password_file = test.temp_dir.path().join("password.txt");
         std::fs::write(&password_file, "password\n")?;
 
@@ -1232,8 +1223,8 @@ mod tests {
             test.config().clone(),
         )
         .await;
-
         assert!(result.is_err());
+
         Ok(())
     }
 

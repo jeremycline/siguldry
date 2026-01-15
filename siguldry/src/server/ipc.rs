@@ -110,14 +110,28 @@ impl Server {
             .arg("--property=NoExecPaths=/")
             .arg(format!(
                 "--property=ExecPaths={} /usr/bin/openssl /usr/libexec/sequoia-keystore /usr/lib /usr/lib64",
-                &config.signer_executable.display(),
-            ))
+                &config.signer.executable.display(),
+            ));
+
+        for env_var in &config.signer.allowed_environment_vars {
+            let _ = std::env::var(env_var)
+                .map(|value| helper.arg(format!("--setenv={}={}", env_var, value)))
+                .inspect_err(|error| {
+                    tracing::warn!(
+                        ?error,
+                        variable = env_var,
+                        "Failed to pass environment variable to helper"
+                    );
+                });
+        }
+
+        helper
             .arg("--")
-            .arg(&config.signer_executable)
+            .arg(&config.signer.executable)
             .arg("--session-id")
             .arg(session_id.to_string())
             .arg("--log-filter")
-            .arg(std::env::var("SIGULDRY_SERVER_LOG").unwrap_or("WARN".to_string()))
+            .arg(std::env::var("SIGULDRY_SERVER_LOG").unwrap_or("DEBUG".to_string()))
             .arg("--working-dir")
             .arg(working_dir.path())
             .stdin(Stdio::piped())

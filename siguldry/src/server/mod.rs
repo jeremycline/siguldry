@@ -9,4 +9,4 @@ pub(crate) mod handlers;
 pub mod ipc;
 pub mod service;
 
-pub use config::Config;
+pub use config::{Config, Signer as SignerConfig};

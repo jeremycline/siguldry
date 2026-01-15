@@ -60,7 +60,7 @@ fn encode_digest_info(algorithm: DigestAlgorithm, hash: &[u8]) -> anyhow::Result
         .map_err(|e| anyhow::anyhow!("Failed to encode DigestInfo: {e}"))
 }
 
-/// Sign a set of digests with a software key protected by a password.
+/// Sign a set of digests with a key stored in the database protected by a password.
 pub fn sign_with_softkey(
     key: &db::Key,
     password: &Password,
@@ -181,13 +181,11 @@ mod tests {
     use std::process::Command;
 
     use anyhow::Result;
-    use openssl::ec::EcGroup;
-    use openssl::nid::Nid;
-    use openssl::symm::Cipher;
     use tempfile::TempDir;
 
     use super::*;
     use crate::protocol::DigestAlgorithm;
+    use crate::server::crypto;
     use crate::server::crypto::test_utils::setup_hsm;
     use crate::server::crypto::token::import_pkcs11_token;
 
@@ -330,35 +328,29 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn sign_with_softkey_rsa() -> Result<()> {
+    #[tokio::test]
+    async fn sign_with_softkey_rsa() -> Result<()> {
         let temp_dir = TempDir::new()?;
-        let key_password = Password::from("test-key-password");
+        let user_password = Password::from("test-key-password");
 
-        // Generate an RSA key pair
-        let rsa = Rsa::generate(4096)?;
-        let pkey = PKey::from_rsa(rsa)?;
-        let public_key_pem = String::from_utf8(pkey.public_key_to_pem()?)?;
-        let private_key_pem = key_password.map(|password| {
-            pkey.private_key_to_pem_pkcs8_passphrase(Cipher::aes_256_cbc(), password)
-        })?;
-        let private_key_pem = String::from_utf8(private_key_pem)?;
-
-        // Create a db::Key struct for the softkey
+        let key_algorithm = KeyAlgorithm::Rsa4K;
+        let (handle, key_access_password, key_material, public_key) =
+            crypto::create_encrypted_key(&[], user_password.clone(), key_algorithm)?;
+        let key_password =
+            crypto::binding::decrypt_key_password(&[], user_password, &key_access_password).await?;
         let key = db::Key {
             id: 1,
             name: "test-rsa-softkey".to_string(),
-            key_algorithm: KeyAlgorithm::Rsa4K,
+            key_algorithm,
             key_purpose: db::KeyPurpose::Signing,
-            handle: "test-handle".to_string(),
-            key_material: private_key_pem,
-            public_key: public_key_pem.clone(),
+            handle,
+            key_material,
+            public_key,
             pkcs11_token_id: None,
             pkcs11_key_id: None,
         };
 
-        // Create test data and sign it
-        let data = b"test data for RSA softkey signing";
+        let data = b"test data";
         let digest = openssl::hash::hash(openssl::hash::MessageDigest::sha256(), data)?;
         let hex_hash = hex::encode(&digest);
 
@@ -406,30 +398,24 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn sign_with_softkey_ecc() -> Result<()> {
+    #[tokio::test]
+    async fn sign_with_softkey_ecc() -> Result<()> {
         let temp_dir = TempDir::new()?;
-        let key_password = Password::from("test-key-password");
+        let user_password = Password::from("test-key-password");
 
-        // Generate a P-256 EC key pair
-        let ec_group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)?;
-        let ec_key = EcKey::generate(&ec_group)?;
-        let pkey = PKey::from_ec_key(ec_key)?;
-        let public_key_pem = String::from_utf8(pkey.public_key_to_pem()?)?;
-        let private_key_pem = key_password.map(|password| {
-            pkey.private_key_to_pem_pkcs8_passphrase(Cipher::aes_256_cbc(), password)
-        })?;
-        let private_key_pem = String::from_utf8(private_key_pem)?;
-
-        // Create a db::Key struct for the softkey
+        let key_algorithm = KeyAlgorithm::P256;
+        let (handle, key_access_password, key_material, public_key) =
+            crypto::create_encrypted_key(&[], user_password.clone(), key_algorithm)?;
+        let key_password =
+            crypto::binding::decrypt_key_password(&[], user_password, &key_access_password).await?;
         let key = db::Key {
             id: 1,
             name: "test-ecc-softkey".to_string(),
-            key_algorithm: KeyAlgorithm::P256,
+            key_algorithm,
             key_purpose: db::KeyPurpose::Signing,
-            handle: "test-handle".to_string(),
-            key_material: private_key_pem,
-            public_key: public_key_pem.clone(),
+            handle,
+            key_material,
+            public_key,
             pkcs11_token_id: None,
             pkcs11_key_id: None,
         };

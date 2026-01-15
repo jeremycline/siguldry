@@ -36,7 +36,7 @@ pub(crate) fn generate_password() -> anyhow::Result<Password> {
 }
 
 pub fn create_encrypted_key(
-    config: &crate::server::Config,
+    bindings: &[Pkcs11Binding],
     user_password: Password,
     algorithm: KeyAlgorithm,
 ) -> anyhow::Result<(String, Vec<u8>, String, String)> {
@@ -52,8 +52,7 @@ pub fn create_encrypted_key(
         key.private_key_to_pem_pkcs8_passphrase(Cipher::aes_256_cbc(), key_password)
     })?;
     let private_key_pem = String::from_utf8(private_key_pem)?;
-    let encrypted_password =
-        binding::encrypt_key_password(&config.pkcs11_bindings, user_password, key_password)?;
+    let encrypted_password = binding::encrypt_key_password(&bindings, user_password, key_password)?;
     let handle = format!(
         "{:X?}",
         openssl::hash::hash(MessageDigest::sha256(), &key.public_key_to_der()?)?
@@ -160,6 +159,7 @@ pub(crate) mod test_utils {
                 hsm_db_path.display()
             ),
         )?;
+        let module_path = "/usr/lib64/pkcs11/libkryoptic_pkcs11.so";
         // SAFETY:
         // These tests are required to run with nextest, which starts a new process for each test.
         // Using set_var is only safe if no other code is interacting with the environment variables,
@@ -168,9 +168,8 @@ pub(crate) mod test_utils {
         // this remains the case with current versions of Rust.
         unsafe {
             std::env::set_var("KRYOPTIC_CONF", &hsm_config_path);
+            std::env::set_var("PKCS11_PROVIDER_MODULE", module_path);
         };
-
-        let module_path = "/usr/lib64/pkcs11/libkryoptic_pkcs11.so";
         let pkcs11 = Pkcs11::new(module_path).context("Install the kryoptic PKCS#11 module")?;
         pkcs11
             .initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK))
@@ -180,9 +179,10 @@ pub(crate) mod test_utils {
             .pop()
             .expect("no slot available");
         let so_pin = AuthPin::new("12345678".into());
-        let user_pin = AuthPin::new("secret-password".into());
+        let user_pin_str = "secret-password";
+        let user_pin = AuthPin::new(user_pin_str.into());
         pkcs11
-            .init_token(slot, &so_pin, "test")
+            .init_token(slot, &so_pin, "test-token")
             .context("Failed to initialize token")?;
         pkcs11
             .open_rw_session(slot)
@@ -262,7 +262,7 @@ pub(crate) mod test_utils {
 
         pkcs11.finalize()?;
 
-        let rsa_key_uri = "pkcs11:model=v1;manufacturer=Kryoptic%20Project;token=test;id=%01;object=binding-key;type=private";
+        let rsa_key_uri = "pkcs11:model=v1;manufacturer=Kryoptic%20Project;token=test-token;id=%01;object=binding-key;type=private";
         let cert_file = hsm_dir.path().join("cert0");
         let mut command = Command::new("openssl");
         let output = command
@@ -272,11 +272,11 @@ pub(crate) mod test_utils {
                 "-x509",
                 "-provider",
                 "pkcs11",
-                "-passin",
-                "pass:secret-password",
                 "-subj",
                 "/CN=BindingKey",
             ])
+            .arg("-passin")
+            .arg(format!("pass:{}", user_pin_str))
             .arg("-key")
             .arg(rsa_key_uri)
             .arg("-out")

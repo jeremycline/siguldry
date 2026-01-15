@@ -110,6 +110,12 @@ pub mod keys {
 
     pub const EC_KEY_NAME: &str = "test-ec-key";
     pub const EC_KEY_PASSWORD: &str = "🌙🌙🌙🌙";
+
+    pub const HSM_PIN: &str = "test-hsm-ec-key";
+    pub const HSM_ACCESS_PASSWORD: &str = "🦆🦆🦆🦆🪿";
+
+    pub const HSM_EC_KEY_NAME: &str = "test-hsm-ec-key";
+    pub const HSM_RSA_KEY_NAME: &str = "test-hsm-rsa-key";
 }
 
 /// Builder for creating test instances with specific key configurations.
@@ -120,6 +126,8 @@ struct InstanceBuilder {
     with_ca_key: bool,
     with_codesigning_key: bool,
     with_ec_key: bool,
+    with_hsm_ec_key: bool,
+    with_hsm_rsa_key: bool,
     with_hsm: bool,
 }
 
@@ -151,18 +159,27 @@ impl InstanceBuilder {
         self
     }
 
+    fn with_hsm_ec_key(mut self) -> Self {
+        self.with_hsm = true;
+        self.with_ca_key = true;
+        self.with_hsm_ec_key = true;
+        self
+    }
+
+    fn with_hsm_rsa_key(mut self) -> Self {
+        self.with_hsm = true;
+        self.with_ca_key = true;
+        self.with_hsm_rsa_key = true;
+        self
+    }
+
     fn with_all_keys(mut self) -> Self {
         self.with_gpg_key = true;
         self.with_ca_key = true;
         self.with_codesigning_key = true;
         self.with_ec_key = true;
-        self
-    }
-
-    #[allow(dead_code)]
-    fn with_hsm(mut self) -> Self {
-        self.with_hsm = true;
-        self.with_ca_key = true;
+        self.with_hsm_rsa_key = true;
+        self.with_hsm_ec_key = true;
         self
     }
 
@@ -253,7 +270,10 @@ impl InstanceBuilder {
             bridge_hostname: bridge_hostname.to_string(),
             bridge_port: bridge.server_port(),
             credentials: creds.server.clone(),
-            signer_executable: cargo::cargo_bin!("siguldry-signer").to_path_buf(),
+            signer: server::SignerConfig {
+                executable: cargo::cargo_bin!("siguldry-signer").to_path_buf(),
+                allowed_environment_vars: vec!["KRYOPTIC_CONF".to_string()],
+            },
             user_password_length: NonZeroU16::new(keys::GPG_KEY_PASSWORD.len() as u16)
                 .expect("it's three geese"),
             pkcs11_bindings: vec![],
@@ -279,7 +299,25 @@ impl InstanceBuilder {
         }
 
         if let Some((pkcs11, slot, user_pin)) = pkcs11 {
-            Self::create_hsm_rsa_key(pkcs11, slot, &user_pin).await?;
+            if self.with_hsm_rsa_key {
+                Self::create_hsm_rsa_key(&pkcs11, slot, &user_pin)?;
+            }
+            if self.with_hsm_ec_key {
+                Self::create_hsm_ec_key(&pkcs11, slot, &user_pin)?;
+            }
+
+            Self::run_server_command(
+                &server_config_file,
+                &[
+                    "manage",
+                    "pkcs11",
+                    "register",
+                    "--module",
+                    "/usr/lib64/pkcs11/libkryoptic_pkcs11.so",
+                    "siguldry-client",
+                ],
+                Some(&format!("{}\n{}\n", "654321", keys::HSM_ACCESS_PASSWORD)),
+            )?;
         }
 
         if self.with_codesigning_key {
@@ -358,25 +396,67 @@ impl InstanceBuilder {
         )
     }
 
-    async fn create_hsm_rsa_key(
-        pkcs11: Pkcs11,
-        slot: Slot,
-        user_pin: &AuthPin,
-    ) -> anyhow::Result<()> {
+    fn create_hsm_rsa_key(pkcs11: &Pkcs11, slot: Slot, user_pin: &AuthPin) -> anyhow::Result<()> {
         let id = Attribute::Id(vec![1]);
+        let label = Attribute::Label(keys::HSM_RSA_KEY_NAME.as_bytes().to_vec());
         let _ = pkcs11.open_rw_session(slot).and_then(|session| {
             session.login(UserType::User, Some(user_pin))?;
-            let pubkey_template = [
-                Attribute::Token(true),
-                Attribute::Private(false),
-                id.clone(),
-                Attribute::ModulusBits(2048.into()),
-            ];
-            let privkey_template = [Attribute::Token(true), id.clone()];
             session.generate_key_pair(
                 &Mechanism::RsaPkcsKeyPairGen,
-                &pubkey_template,
-                &privkey_template,
+                &[
+                    id.clone(),
+                    label.clone(),
+                    Attribute::Token(true),
+                    Attribute::Private(false),
+                    Attribute::Verify(true),
+                    Attribute::Encrypt(true),
+                    Attribute::ModulusBits(4096.into()),
+                ],
+                &[
+                    id.clone(),
+                    label.clone(),
+                    Attribute::Token(true),
+                    Attribute::Private(true),
+                    Attribute::Sensitive(true),
+                    Attribute::Sign(true),
+                    Attribute::Decrypt(true),
+                ],
+            )
+        })?;
+
+        Ok(())
+    }
+
+    fn create_hsm_ec_key(pkcs11: &Pkcs11, slot: Slot, user_pin: &AuthPin) -> anyhow::Result<()> {
+        let id = Attribute::Id(vec![42]);
+        let label = Attribute::Label(keys::HSM_EC_KEY_NAME.as_bytes().to_vec());
+        let _ = pkcs11.open_rw_session(slot).and_then(|session| {
+            session.login(UserType::User, Some(user_pin))?;
+
+            // Annoyingly it doesn't seem possible to convert a named curve Nid to ASN.1 in
+            // OpenSSL, so we manually create it from the OID for NIST P-256.
+            let p256_oid = asn1::oid!(1, 2, 840, 10045, 3, 1, 7);
+            let p256_oid_bytes = asn1::write_single(&p256_oid).unwrap();
+            session.generate_key_pair(
+                &Mechanism::EccKeyPairGen,
+                &[
+                    id.clone(),
+                    label.clone(),
+                    Attribute::Token(true),
+                    Attribute::Private(false),
+                    Attribute::EcParams(p256_oid_bytes),
+                    Attribute::Verify(true),
+                    Attribute::Encrypt(true),
+                ],
+                &[
+                    id.clone(),
+                    label.clone(),
+                    Attribute::Token(true),
+                    Attribute::Private(true),
+                    Attribute::Sensitive(true),
+                    Attribute::Sign(true),
+                    Attribute::Decrypt(true),
+                ],
             )
         })?;
 
@@ -1079,6 +1159,74 @@ async fn ec_prehashed_signature() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn hsm_ec_prehashed_signature() -> anyhow::Result<()> {
+    let instance = InstanceBuilder::new().with_hsm_ec_key().build().await?;
+    let data = "🦡🦡🦡🦡🍄🍄".as_bytes();
+    let data_sum = openssl::hash::hash(openssl::hash::MessageDigest::sha256(), data)?.to_vec();
+    let data_hex = hex::encode(&data_sum);
+
+    instance
+        .client
+        .unlock(
+            keys::HSM_EC_KEY_NAME.to_string(),
+            keys::HSM_ACCESS_PASSWORD.to_string(),
+        )
+        .await?;
+    let key = instance
+        .client
+        .get_key(keys::HSM_EC_KEY_NAME.to_string())
+        .await?;
+    let signature = instance
+        .client
+        .sign_prehashed(
+            keys::HSM_EC_KEY_NAME.to_string(),
+            vec![(DigestAlgorithm::Sha256, data_hex)],
+        )
+        .await?
+        .pop()
+        .unwrap();
+
+    let pubkey_path = instance.state_dir.path().join("ec-pubkey.pem");
+    std::fs::write(&pubkey_path, &key.public_key)?;
+    let sig_path = instance.state_dir.path().join("data.sig");
+    std::fs::write(&sig_path, &signature.signature)?;
+    let data_path = instance.state_dir.path().join("data");
+    std::fs::write(&data_path, data)?;
+    // Check the key is the expected format
+    let mut command = tokio::process::Command::new("openssl");
+    let output = command
+        .arg("ec")
+        .arg("-pubin")
+        .arg("-in")
+        .arg(&pubkey_path)
+        .arg("-text")
+        .arg("-noout")
+        .output()
+        .await?;
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(stdout.contains("NIST CURVE: P-256"));
+
+    let mut command = tokio::process::Command::new("openssl");
+    let output = command
+        .arg("dgst")
+        .arg("-verify")
+        .arg(pubkey_path)
+        .arg("-signature")
+        .arg(sig_path)
+        .arg(data_path)
+        .output()
+        .await?;
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout)?;
+    assert_eq!("Verified OK\n", stdout);
+
+    instance.halt().await?;
+    Ok(())
+}
+
 /// Get a signature on pre-hashed data.
 #[tokio::test]
 #[tracing_test::traced_test]
@@ -1113,6 +1261,60 @@ async fn prehashed_signature() -> anyhow::Result<()> {
         .unwrap();
 
     let pubkey_path = instance.state_dir.path().join("codesigning-pubkey.pem");
+    std::fs::write(&pubkey_path, &key.public_key)?;
+    let sig_path = instance.state_dir.path().join("data.sig");
+    std::fs::write(&sig_path, &signature.signature)?;
+    let data_path = instance.state_dir.path().join("data");
+    std::fs::write(&data_path, data)?;
+    let mut command = tokio::process::Command::new("openssl");
+    let output = command
+        .arg("dgst")
+        .arg("-verify")
+        .arg(pubkey_path)
+        .arg("-signature")
+        .arg(sig_path)
+        .arg(data_path)
+        .output()
+        .await?;
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout)?;
+    assert_eq!("Verified OK\n", stdout);
+
+    instance.halt().await?;
+    Ok(())
+}
+
+/// Get a signature on pre-hashed data.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn hsm_rsa_prehashed_signature() -> anyhow::Result<()> {
+    let instance = InstanceBuilder::new().with_hsm_rsa_key().build().await?;
+    let data = "🦡🦡🦡🦡🍄🍄".as_bytes();
+    let data_sum = openssl::hash::hash(openssl::hash::MessageDigest::sha256(), data)?.to_vec();
+    let data_hex = hex::encode(&data_sum);
+
+    instance
+        .client
+        .unlock(
+            keys::HSM_RSA_KEY_NAME.to_string(),
+            keys::HSM_ACCESS_PASSWORD.to_string(),
+        )
+        .await?;
+    let key = instance
+        .client
+        .get_key(keys::HSM_RSA_KEY_NAME.to_string())
+        .await?;
+    let signature = instance
+        .client
+        .sign_prehashed(
+            keys::HSM_RSA_KEY_NAME.to_string(),
+            vec![(DigestAlgorithm::Sha256, data_hex)],
+        )
+        .await?
+        .pop()
+        .unwrap();
+
+    let pubkey_path = instance.state_dir.path().join("hsm-rsa-pubkey.pem");
     std::fs::write(&pubkey_path, &key.public_key)?;
     let sig_path = instance.state_dir.path().join("data.sig");
     std::fs::write(&sig_path, &signature.signature)?;

@@ -252,7 +252,10 @@ impl InstanceBuilder {
             bridge_hostname: bridge_hostname.to_string(),
             bridge_port: bridge.server_port(),
             credentials: creds.server.clone(),
-            signer_executable: cargo::cargo_bin!("siguldry-signer").to_path_buf(),
+            signer: server::SignerConfig {
+                executable: cargo::cargo_bin!("siguldry-signer").to_path_buf(),
+                allowed_environment_vars: vec!["KRYOPTIC_CONF".to_string()],
+            },
             user_password_length: NonZeroU16::new(keys::GPG_KEY_PASSWORD.len() as u16)
                 .expect("it's three geese"),
             pkcs11_bindings: vec![],

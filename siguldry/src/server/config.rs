@@ -47,7 +47,9 @@ pub struct Config {
     /// The rest of the certificate's subject is specified here.
     pub certificate_subject: X509SubjectName,
 
-    pub signer_executable: PathBuf,
+    /// Configuration for the helper executable used by the server to isolate the signing
+    /// operation from the process serving client requests.
+    pub signer: Signer,
 
     /// The set of certificates to encrypt passwords with.
     ///
@@ -60,6 +62,32 @@ pub struct Config {
     /// password.
     #[serde(default)]
     pub pkcs11_bindings: Vec<Pkcs11Binding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Signer {
+    /// The absolute path to the siguldry-signer executable.
+    ///
+    /// In RPM environments, this is likely to be /usr/libexec/siguldry-signer.
+    pub executable: PathBuf,
+    /// A list of environment variables which will be passed to the environment
+    /// of the isolated executable performing the actual signing. This is primarily
+    /// useful if using a PKCS#11 module that reads configuration via an environment
+    /// variable.
+    ///
+    /// WARNING: These value of the environment variable is passed to systemd-run
+    /// as command-line arguments and thus you MUST NOT set this to include environment
+    /// variables that contain secrets!
+    pub allowed_environment_vars: Vec<String>,
+}
+
+impl Default for Signer {
+    fn default() -> Self {
+        Self {
+            executable: PathBuf::from("/usr/libexec/siguldry-signer"),
+            allowed_environment_vars: Default::default(),
+        }
+    }
 }
 
 /// The values to use when creating x509 certificates in subject names.
@@ -133,7 +161,7 @@ impl Default for Config {
             bridge_port: 44333,
             connection_pool_size: 32,
             user_password_length: NonZeroU16::new(32).unwrap(),
-            signer_executable: PathBuf::from("/usr/libexec/siguldry-signer"),
+            signer: Default::default(),
             credentials: Credentials {
                 private_key: PathBuf::from("siguldry.server.private_key.pem"),
                 certificate: PathBuf::from("siguldry.server.certificate.pem"),
