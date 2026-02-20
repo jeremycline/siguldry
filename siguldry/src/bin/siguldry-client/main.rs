@@ -80,8 +80,6 @@ struct Cli {
 enum Command {
     /// Attempt to authenticate with the server and print the username of the authenticated user.
     Whoami,
-    /// List the users on the server.
-    ListUsers,
     /// See the current configuration, or the defaults if no configuration file is supplied.
     Config,
     /// Proxy commands from a local process to the server.
@@ -97,6 +95,28 @@ enum Command {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
+    /// Commands for inspecting users
+    #[command(subcommand)]
+    Users(UserCommands),
+    /// Commands for inspecting keys
+    #[command(subcommand)]
+    Keys(KeyCommands),
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum KeyCommands {
+    List,
+    /// Get details for a key
+    Get {
+        /// The key name
+        name: String,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum UserCommands {
+    List,
+    Get,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -146,11 +166,44 @@ async fn main() -> anyhow::Result<()> {
             let user = client.who_am_i().await?;
             println!("Hello, {user}, you can successfully authenticate with the server!");
         }
-        Command::ListUsers => {
-            let users = client.list_users().await?;
-            let users = users.join("\n");
-            println!("{users}");
-        }
+        Command::Users(command) => match command {
+            UserCommands::List => {
+                let users = client.list_users().await?;
+                let users = users.join("\n");
+                println!("{users}");
+            }
+            UserCommands::Get => todo!(),
+        },
+        Command::Keys(command) => match command {
+            KeyCommands::List => {
+                let keys = client.list_keys().await?;
+                for key in keys {
+                    println!("{}", key.name);
+                }
+            }
+            KeyCommands::Get { name } => {
+                let key = client.get_key(name).await?;
+                println!("Public key:\n{}", key.public_key);
+                for cert in key.certificates.iter() {
+                    match cert {
+                        siguldry::protocol::Certificate::Pgp {
+                            version,
+                            certificate,
+                            fingerprint,
+                        } => {
+                            println!(
+                                "OpenPGP Certificate (v{}) {}:\n{}",
+                                version, fingerprint, certificate
+                            );
+                        }
+                        siguldry::protocol::Certificate::X509 { name, certificate } => {
+                            println!("X509 Certificate {}:\n{}", name, certificate);
+                        }
+                        _ => todo!(),
+                    }
+                }
+            }
+        },
         Command::Config => unreachable!("Command handled prior to this match"),
         Command::Proxy { socket } => {
             if let Some(socket) = socket {
