@@ -245,13 +245,62 @@ impl Attribute {
     fn common_attributes(key: &Key) -> anyhow::Result<HashMap<u64, Attribute>> {
         let mut attrs = HashMap::new();
 
-        attrs.insert(
-            CKA_ID,
-            Attribute {
-                attribute_type: CKA_ID,
-                value: vec![1_u8],
-            },
-        );
+        match key.certificates.first() {
+            Some(Certificate::Gpg {
+                version,
+                certificate,
+                fingerprint,
+            }) => {
+                // sequioa-cryptoki uses the Id attribute to stash various OpenPGP parameters.
+                // Reproduce those here so the cryptoki backend recognizes this as useable for
+                // OpenPGP signatures.
+                //
+                // This format is from sequoia-cryptoki; it may be subject to change.
+                // Id attribute needs to be a UTF-8 encoded string with the following format:
+                //
+                // pgp:v{6|6t|6pq|4|4t|4pq}:{key_algorithm}:{iso8601-1:2019 basic format creation time}
+                //
+                // The v<num> indicates the OpenPGP profile, and hybrid keys expose their traditional
+                // and post-quantum pieces with the t or pq suffix respectively (we don't currently
+                // support this).
+                //
+                // Finally, ECDSA keys are documented as needing the hash algorithm and symmetric encryption
+                // algorithm after the key algorithm (separated by -, e.g. "rsa-sha256-aes128"), but we
+                // don't support that currently either.
+                let cert = sequoia_openpgp::Cert::from_bytes(certificate.as_bytes())?;
+                let pgp_key = cert.primary_key().key();
+                let key_algo = match key.key_algorithm {
+                    KeyAlgorithm::Rsa2K | KeyAlgorithm::Rsa4K => "rsa",
+                    KeyAlgorithm::P256 => "ecdsa",
+                    _ => return Err(anyhow::anyhow!("Unsupported key algorithm")),
+                };
+                let creation_time = chrono::DateTime::<chrono::Utc>::from(pgp_key.creation_time())
+                    .format("%Y%m%dT%H%M%SZ")
+                    .to_string();
+                let id = format!("pgp:v{version}:{key_algo}:{creation_time}:{}", &key.name);
+                tracing::info!(
+                    fingerprint,
+                    id,
+                    "Exposing OpenPGP key for use via Sequoia's cryptoki backend"
+                );
+                attrs.insert(
+                    CKA_ID,
+                    Attribute {
+                        attribute_type: CKA_ID,
+                        value: id.as_bytes().to_vec(),
+                    },
+                );
+            }
+            _other => {
+                attrs.insert(
+                    CKA_ID,
+                    Attribute {
+                        attribute_type: CKA_ID,
+                        value: vec![1_u8],
+                    },
+                );
+            }
+        }
         attrs.insert(
             CKA_LABEL,
             Attribute {

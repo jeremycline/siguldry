@@ -27,6 +27,11 @@ version = "0.23"
 [dependencies.cryptoki]
 version = "0.12"
 
+[dependencies.chrono]
+version = "0.4"
+default-features = false
+features = ["std"]
+
 # Convenient bindings for PKCS#11 types; we could generate these ourselves
 # from pkcs11.h but cryptoki comes with some safe wrappers we want, too.
 [dependencies.cryptoki-sys]
