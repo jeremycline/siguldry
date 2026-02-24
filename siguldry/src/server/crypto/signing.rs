@@ -9,8 +9,18 @@
 use anyhow::Context;
 use asn1::{ObjectIdentifier, oid};
 use cryptoki::{mechanism::Mechanism, session::Session};
-use openssl::{ec::EcKey, pkey::PKey, pkey_ctx::PkeyCtx, rsa::Rsa};
-use sequoia_openpgp::crypto::Password;
+use openssl::{
+    bn::{BigNum, BigNumContext},
+    ec::EcKey,
+    pkey::PKey,
+    pkey_ctx::PkeyCtx,
+    rsa::Rsa,
+};
+use sequoia_openpgp::{
+    crypto::{Password, mpi},
+    parse::Parse,
+    policy::StandardPolicy,
+};
 
 use crate::{
     protocol::{self, DigestAlgorithm, KeyAlgorithm, json::SignaturePayload},
@@ -27,13 +37,13 @@ const OID_SHA3_512: ObjectIdentifier = oid!(2, 16, 840, 1, 101, 3, 4, 2, 10);
 
 /// Used for RSA PKCS1 v1.5 signatures.
 /// Reference: https://www.ietf.org/rfc/rfc8017.html#section-9.2
-#[derive(asn1::Asn1Write)]
+#[derive(asn1::Asn1Write, asn1::Asn1Read)]
 struct DigestInfo<'a> {
     digest_algorithm: AlgorithmIdentifier,
     digest: &'a [u8],
 }
 
-#[derive(asn1::Asn1Write)]
+#[derive(asn1::Asn1Write, asn1::Asn1Read)]
 struct AlgorithmIdentifier {
     algorithm: ObjectIdentifier,
     parameters: (),
@@ -60,24 +70,106 @@ fn encode_digest_info(algorithm: DigestAlgorithm, hash: &[u8]) -> anyhow::Result
         .map_err(|e| anyhow::anyhow!("Failed to encode DigestInfo: {e}"))
 }
 
+pub fn decode_digest_info(digest_info: &[u8]) -> anyhow::Result<(DigestAlgorithm, Vec<u8>)> {
+    let digest_info = asn1::parse_single::<DigestInfo<'_>>(digest_info)?;
+    let algorithm = match digest_info.digest_algorithm.algorithm {
+        OID_SHA256 => DigestAlgorithm::Sha256,
+        OID_SHA3_256 => DigestAlgorithm::Sha3_256,
+        OID_SHA512 => DigestAlgorithm::Sha512,
+        OID_SHA3_512 => DigestAlgorithm::Sha3_512,
+        _ => return Err(anyhow::anyhow!("Unknown digest algorithm in DigestInfo")),
+    };
+    let hash = digest_info.digest.to_vec();
+    Ok((algorithm, hash))
+}
+
+fn pgp_key_to_openssl(
+    cert: &sequoia_openpgp::Cert,
+    password: &Password,
+) -> anyhow::Result<PKey<openssl::pkey::Private>> {
+    let policy = &StandardPolicy::new();
+    let key = cert
+        .keys()
+        .secret()
+        .with_policy(policy, None)
+        .supported()
+        .for_signing()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("No signing-capable key found in certificate"))?
+        .key()
+        .clone()
+        .decrypt_secret(password)?;
+    let secret = match key.secret() {
+        sequoia_openpgp::packet::key::SecretKeyMaterial::Unencrypted(unencrypted) => unencrypted,
+        sequoia_openpgp::packet::key::SecretKeyMaterial::Encrypted(_) => {
+            return Err(anyhow::anyhow!("OpenPGP wasn't decrypted"));
+        }
+    };
+
+    let key = secret.map(|secret| {
+        match (key.mpis(), secret) {
+            (mpi::PublicKey::RSA { e, n }, mpi::SecretKeyMaterial::RSA { d, p, q, u: _ }) => {
+                let e = BigNum::from_slice(e.value())?;
+                let n = BigNum::from_slice(n.value())?;
+                let d = BigNum::from_slice(d.value())?;
+                let p = BigNum::from_slice(p.value())?;
+                let q = BigNum::from_slice(q.value())?;
+                let one = BigNum::from_u32(1)?;
+
+                // https://en.wikipedia.org/wiki/RSA_cryptosystem#Using_the_Chinese_remainder_algorithm
+                let mut context = BigNumContext::new_secure()?;
+                let mut p_sub_1 = BigNum::new()?;
+                p_sub_1.checked_sub(&p, &one)?;
+                let mut dmp1 = BigNum::new()?;
+                dmp1.checked_rem(&d, &p_sub_1, &mut context)?;
+
+                let mut context = BigNumContext::new_secure()?;
+                let mut q_sub_1 = BigNum::new()?;
+                q_sub_1.checked_sub(&q, &one)?;
+                let mut dmq1 = BigNum::new()?;
+                dmq1.checked_rem(&d, &q_sub_1, &mut context)?;
+
+                let mut context = BigNumContext::new_secure()?;
+                let mut iqmp = BigNum::new()?;
+                iqmp.mod_inverse(&q, &p, &mut context)?;
+
+                let privkey = Rsa::from_private_components(n, e, d, p, q, dmp1, dmq1, iqmp)?;
+                privkey.check_key()?;
+                Ok(PKey::from_rsa(privkey)?)
+            }
+            _unsupported => Err(anyhow::anyhow!(
+                "No support for signing via OpenSSL with this OpenPGP key type"
+            )),
+        }
+    })?;
+
+    Ok(key)
+}
+
 /// Sign a set of digests with a key stored in the database protected by a password.
 pub fn sign_with_softkey(
     key: &db::Key,
     password: &Password,
     digests: Vec<(DigestAlgorithm, String)>,
 ) -> anyhow::Result<Vec<protocol::json::Signature>> {
-    let pkey = match key.key_algorithm {
-        KeyAlgorithm::Rsa4K | KeyAlgorithm::Rsa2K => password
-            .map(|password| {
-                Rsa::private_key_from_pem_passphrase(key.key_material.as_bytes(), password)
-            })
-            .and_then(PKey::from_rsa),
-        KeyAlgorithm::P256 => password
-            .map(|password| {
-                EcKey::private_key_from_pem_passphrase(key.key_material.as_bytes(), password)
-            })
-            .and_then(PKey::from_ec_key),
-    }?;
+    let pkey = match key.key_purpose {
+        db::KeyPurpose::PGP => {
+            let cert = sequoia_openpgp::Cert::from_bytes(&key.key_material)?;
+            pgp_key_to_openssl(&cert, password)?
+        }
+        db::KeyPurpose::Signing => match key.key_algorithm {
+            KeyAlgorithm::Rsa4K | KeyAlgorithm::Rsa2K => password
+                .map(|password| {
+                    Rsa::private_key_from_pem_passphrase(key.key_material.as_bytes(), password)
+                })
+                .and_then(PKey::from_rsa),
+            KeyAlgorithm::P256 => password
+                .map(|password| {
+                    EcKey::private_key_from_pem_passphrase(key.key_material.as_bytes(), password)
+                })
+                .and_then(PKey::from_ec_key),
+        }?,
+    };
 
     let mut signatures = Vec::with_capacity(digests.len());
     for (algorithm, hex_hash) in digests {
