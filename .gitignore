@@ -9,3 +9,9 @@ devel/sigul-data/
 
 # Avoid checking in test artifacts
 **/*.efi
+
+mkosi.local.conf
+mkosi.cache
+mkosi.output
+mkosi.crt
+mkosi.key
