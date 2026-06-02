@@ -15,11 +15,15 @@ repository = "https://github.com/fedora-infra/siguldry"
 workspace = true
 
 [features]
-default = ["server", "cli"]
+default = ["server", "cli", "otel"]
 # Enable the server APIs
 server = ["dep:cryptoki", "dep:sqlx", "dep:rustix"]
 # Build command-line interfaces for enabled components
 cli = ["dep:clap", "dep:tracing-subscriber", "tokio/rt-multi-thread"]
+
+# Optional OpenTelemetry integration.
+# This isn't packaged for Fedora, so it's really only useful for development.
+otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
 
 # Build the Sigul 1.2 client
 sigul-client = []
@@ -46,6 +50,24 @@ optional = true
 
 [dependencies.hex]
 version = "0.4"
+
+[dependencies.opentelemetry]
+version = "0.32"
+optional = true
+
+[dependencies.opentelemetry_sdk]
+version = "0.32"
+features = ["rt-tokio"]
+optional = true
+
+[dependencies.opentelemetry-otlp]
+version = "0.32"
+features = ["grpc-tonic"]
+optional = true
+
+[dependencies.tracing-opentelemetry]
+version = "0.33"
+optional = true
 
 [dependencies.openssl]
 version = "0.10"

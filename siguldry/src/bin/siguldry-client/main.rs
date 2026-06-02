@@ -39,6 +39,19 @@ struct Cli {
     #[arg(long)]
     pub span_events: bool,
 
+    /// The OTLP endpoint to export OpenTelemetry traces to.
+    ///
+    /// When set, traces are exported via gRPC to the given endpoint.
+    ///
+    /// Defaults to http://localhost:4317
+    #[arg(
+        long,
+        env = "OTEL_EXPORTER_OTLP_ENDPOINT",
+        default_value = "http://localhost:4317"
+    )]
+    #[cfg(feature = "otel")]
+    pub otlp_endpoint: Option<String>,
+
     /// The directory containing the client's authentication secrets.
     ///
     /// Any file referenced in the configuration that are not absolute paths are
@@ -138,6 +151,12 @@ async fn main() -> anyhow::Result<()> {
             filter/struct.EnvFilter.html#directives for format details.",
     )?;
     let registry = tracing_subscriber::registry();
+    #[cfg(feature = "otel")]
+    let (_otel_guard, registry) = {
+        let (otel_guard, otel_layer) =
+            siguldry::init_otel(opts.otlp_endpoint.as_deref(), "siguldry-client")?;
+        Ok::<_, anyhow::Error>((otel_guard, registry.with(otel_layer)))
+    }?;
     let stderr_layer = tracing_subscriber::fmt::layer()
         .without_time()
         .with_writer(std::io::stderr);

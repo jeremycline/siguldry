@@ -53,6 +53,20 @@ pub struct Cli {
         default_value = "WARN,siguldry=INFO"
     )]
     pub log_filter: String,
+
+    /// The OTLP endpoint to export OpenTelemetry traces to.
+    ///
+    /// When set, traces are exported via gRPC to the given endpoint.
+    ///
+    /// Defaults to http://localhost:4317
+    #[arg(
+        long,
+        env = "OTEL_EXPORTER_OTLP_ENDPOINT",
+        default_value = "http://localhost:4317"
+    )]
+    #[cfg(feature = "otel")]
+    pub otlp_endpoint: Option<String>,
+
     #[command(subcommand)]
     pub command: Command,
 }

@@ -49,8 +49,12 @@ By default, the server, bridge, and client for Siguldry along with their CLIs is
 [2]: https://crates.io/crates/siguldry-pkcs11
 */
 
+#[cfg(feature = "otel")]
+use anyhow::Context;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
+#[cfg(feature = "otel")]
+use tracing_subscriber::Layer;
 
 #[cfg(feature = "sigul-client")]
 mod serdes;
@@ -95,6 +99,62 @@ pub async fn signal_handler(halt_token: CancellationToken) -> Result<(), anyhow:
                 tracing::info!("SIGINT received, beginning service shutdown");
                 halt_token.cancel();
             }
+        }
+    }
+}
+
+/// Initialize an OpenTelemetry tracing layer that exports spans via a Tonic client
+///
+/// Returns a guard that shuts down the tracer provider on drop, along with
+/// the layer to register with the tracing subscriber. If no endpoint is
+/// provided, both are `None`.
+#[cfg(feature = "otel")]
+#[doc(hidden)]
+pub fn init_otel(
+    endpoint: Option<&str>,
+    name: &'static str,
+) -> anyhow::Result<(
+    Option<OtelGuard>,
+    Option<impl Layer<tracing_subscriber::Registry>>,
+)> {
+    use opentelemetry::trace::TracerProvider;
+    use opentelemetry_otlp::WithExportConfig;
+    let endpoint = if let Some(endpoint) = endpoint {
+        endpoint
+    } else {
+        return Ok((None, None));
+    };
+
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(endpoint)
+        .build()
+        .context("Failed to create OTLP span exporter")?;
+
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOn)
+        .with_batch_exporter(exporter)
+        .build();
+
+    let tracer = provider.tracer(name);
+    let layer = tracing_opentelemetry::layer().with_tracer(tracer);
+
+    tracing::info!(endpoint, "OpenTelemetry OTLP export enabled");
+    Ok((Some(OtelGuard(provider)), Some(layer)))
+}
+
+#[cfg(feature = "otel")]
+#[doc(hidden)]
+pub struct OtelGuard(opentelemetry_sdk::trace::SdkTracerProvider);
+
+#[cfg(feature = "otel")]
+impl Drop for OtelGuard {
+    fn drop(&mut self) {
+        if let Err(error) = self
+            .0
+            .shutdown_with_timeout(std::time::Duration::from_secs(5))
+        {
+            tracing::error!(?error, "Failed to shut down the OpenTelemetry exporter");
         }
     }
 }

@@ -52,6 +52,13 @@ async fn main() -> anyhow::Result<()> {
     }?;
 
     let registry = tracing_subscriber::registry();
+
+    #[cfg(feature = "otel")]
+    let (_otel_guard, registry) = {
+        let (otel_guard, otel_layer) =
+            siguldry::init_otel(opts.otlp_endpoint.as_deref(), "siguldry-server")?;
+        Ok::<_, anyhow::Error>((otel_guard, registry.with(otel_layer)))
+    }?;
     let stderr_layer = tracing_subscriber::fmt::layer()
         .without_time()
         .with_writer(std::io::stderr);
