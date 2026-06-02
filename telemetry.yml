@@ -1,0 +1,42 @@
+# Local telemetry stack for collecting Prometheus metrics and OpenTelemetry traces.
+#
+# Usage:
+#   podman compose -f telemetry.yml up -d
+#
+# UIs:
+#   Prometheus: http://localhost:9090
+#   Grafana:    http://localhost:3000  (admin/admin)
+#   Jaeger:     http://localhost:16686
+#
+# Prometheus scrapes metrics from services on the host. Add scrape targets
+# in devel/prometheus.yml. Jaeger accepts OTLP over gRPC (port 4317) and
+# HTTP (port 4318), so services can send traces to localhost:4317 or
+# localhost:4318.
+
+services:
+  prometheus:
+    image: docker.io/prom/prometheus:latest
+    network_mode: host
+    volumes:
+      - ./devel/prometheus.yml:/etc/prometheus/prometheus.yml:z
+      - prometheus-data:/prometheus:z
+
+  grafana:
+    image: docker.io/grafana/grafana:latest
+    network_mode: host
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    volumes:
+      - ./devel/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:z
+      - grafana-data:/var/lib/grafana:z
+
+  jaeger:
+    image: cr.jaegertracing.io/jaegertracing/jaeger:2.18.0
+    network_mode: host
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+
+volumes:
+  prometheus-data:
+  grafana-data:
