@@ -38,8 +38,12 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Consume messages from an AMQP broker
-    Consume,
+    /// Run as a service.
+    ///
+    /// In this mode, it will connect to the AMQP broker to process incoming signing requests
+    /// as well as run long-running signing operations like re-signing all content within a
+    /// Koji tag.
+    Run,
 
     /// Process a JSON message
     Process { file: PathBuf },

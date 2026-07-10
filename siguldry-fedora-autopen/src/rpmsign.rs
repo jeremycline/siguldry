@@ -16,13 +16,14 @@ use tempfile::TempPath;
 use tokio::{
     io::{AsyncWriteExt, BufWriter},
     process::Command,
-    sync::Semaphore,
+    sync::{Semaphore, TryAcquireError},
+    task::JoinSet,
 };
 use tracing::{Instrument, Level, instrument};
 
 use crate::{
-    PgpConfig,
-    config::{Config, SigningTool},
+    PgpConfig, SignContext,
+    config::{Config, Ima, ResignTag, SigningTool},
     koji::{KojiHandle, KojiOps, Rpm},
 };
 
@@ -68,6 +69,52 @@ pub(crate) struct BuildsysTag {
     release: String,
 }
 
+/// Re-sign a Koji tag.
+///
+/// This is typically run as a task along side the AMQP consumer. It co-operates with the
+/// configured concurrency and storage limits and when contention occurs, it backs off so
+/// the AMQP consumer has priority.
+#[instrument(skip_all, name = "koji_mass_resign")]
+pub async fn resign_tags<K: crate::koji::KojiOps>(signing_context: SignContext<K>) {
+    // Derive a concurrency semaphore from the real concurrency limit; we'll use this to avoid
+    // spinning on the real one later. This is a little hacky but it should work reasonably well.
+    let resign_concurrency = Arc::new(Semaphore::new(
+        signing_context.koji_signer.concurrency.available_permits(),
+    ));
+    // For each entry in the config for a tag to re-sign, we slowly crawl the tag, forever.
+    loop {
+        let mut resign_tag_tasks = JoinSet::new();
+        for tag in signing_context.config.koji.resign_tags.iter() {
+            tracing::info!(tag.name, tag.siguldry_key, ?tag.file_signing_key, "Beginning mass re-signing operation");
+            let signer = signing_context.koji_signer.clone();
+            resign_tag_tasks.spawn(
+                signer
+                    .sign_tag(tag.clone(), Arc::clone(&resign_concurrency))
+                    .instrument(tracing::Span::current()),
+            );
+        }
+
+        // Maybe we should grant some time to outstanding tasks, but eh...
+        while let Some(result) = tokio::select! {
+            result = resign_tag_tasks.join_next() => {
+                result
+            }
+            _ = signing_context.halt_token.cancelled() => {
+                tracing::info!("Shutdown signal received by the Koji re-signing task; halting");
+                return;
+            }
+        } {
+            // The task logs its return so we only report join errors here.
+            if let Some(error) = result.err() {
+                tracing::error!(?error, "Tokio failed to join the tag signing task");
+            }
+        }
+
+        // Put a little break between iterations.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    }
+}
+
 #[derive(Clone)]
 pub struct KojiSigner<K: KojiOps = KojiHandle> {
     config: Arc<Config>,
@@ -83,16 +130,12 @@ impl<K: KojiOps> KojiSigner<K> {
     pub fn new(
         config: Arc<Config>,
         concurrency: Arc<Semaphore>,
+        storage_limit: Option<Arc<Semaphore>>,
         pgp_home: Arc<PgpConfig>,
         signing_keys: Arc<HashMap<String, Key>>,
         http_client: reqwest::Client,
         koji: K,
     ) -> Self {
-        let storage_limit = config
-            .rpm
-            .storage_limit_mb
-            .map(Semaphore::new)
-            .map(Arc::new);
         Self {
             config,
             pgp_home,
@@ -224,41 +267,13 @@ impl<K: KojiOps> KojiSigner<K> {
             }
         }) {
             let task_signer = self.clone();
-            let fingerprint = cert.fingerprint.clone();
             let target_dir = temp_dir.path().to_path_buf();
-            let expected_sigkey = sigkey.clone();
-            let file_signing_key = tag.file_signing_key.clone();
-            let siguldry_key = tag.siguldry_key.clone();
-            let gpg_home = self
-                .pgp_home
-                .gpg_homedirs
-                .get(&fingerprint)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("OpenPGP fingerprint {fingerprint} missing from gpg homedirs!")
-                })?
-                .to_owned();
-            let ima_certificate = file_signing_key
-                .as_ref()
-                .map(|ima| {
-                    self.signing_keys.get(&ima.siguldry_key).and_then(|k| {
-                        k.certificates
-                            .iter()
-                            .find(|c| c.name == ima.siguldry_x509_cert)
-                    })
-                })
-                .ok_or_else(|| anyhow::anyhow!("The referenced IMA key couldn't be found!"))?
-                .cloned();
-
-            if file_signing_key.is_some() && ima_certificate.is_none() {
-                return Err(anyhow::anyhow!(
-                    "The referenced IMA certificate couldn't be found!"
-                ));
-            }
 
             let rpm_size_in_mb = rpm.size >> 20;
             if let Some(storage_limit) = self.config.rpm.storage_limit_mb
                 && rpm.size > (storage_limit * MB).try_into()?
             {
+                crate::metrics_utils::rpms_failed().increment(1);
                 return Err(anyhow::anyhow!(
                     "RPM is larger ({} MiB) than the configured storage limit ({} MiB) and cannot be signed",
                     rpm.size >> 20,
@@ -271,138 +286,36 @@ impl<K: KojiOps> KojiSigner<K> {
             // the total signing time will be larger, but won't inconvenient the majority of builds and
             // other signing requests that need only a few signatures.
             let signing_permit = Arc::clone(&self.concurrency).acquire_owned().await?;
-            let rpm_span = tracing::info_span!("rpm", rpm.id);
+            let storage_permit =
+                if let Some(storage_limit) = task_signer.storage_limit.as_ref().map(Arc::clone) {
+                    let permit_count = rpm_size_in_mb
+                        .max(1)
+                        .try_into()
+                        .expect("RPMs larger than 4 PiB aren't supported");
+                    let permit = storage_limit.acquire_many_owned(permit_count).await?;
+                    Some(permit)
+                } else {
+                    None
+                };
+
+            let siguldry_key = tag.siguldry_key.clone();
+            let siguldry_cert = tag.siguldry_openpgp_cert.clone();
+            let file_signing_key = tag.file_signing_key.clone();
             signing_tasks.spawn(
                 async move {
-                    let signing_permit = signing_permit;
-                    let storage_permit = if let Some(storage_limit) = task_signer.storage_limit {
-                        let permit_count = rpm_size_in_mb
-                            .max(1)
-                            .try_into()
-                            .expect("RPMs larger than 4 PiB aren't supported");
-                        let permit = storage_limit.acquire_many_owned(permit_count).await?;
-                        Some(permit)
-                    } else {
-                        None
-                    };
-                    let _active_guard =
-                        Gauge::increment(crate::metrics_utils::rpms_active(), 1_f64);
-                    let path = download(&task_signer.http_client, target_dir, &rpm).await?;
-
-                    let mut command = Command::new("rpmsign");
-                    command
-                        .kill_on_drop(true)
-                        .env_clear()
-                        .env("OPENSSL_CONF", &task_signer.pgp_home.openssl_config)
-                        .env("GNUPGHOME", &gpg_home)
-                        .env("SEQUOIA_HOME", &task_signer.pgp_home.sq_homedir)
-                        .arg("--resign")
-                        .arg(format!("--key-id={fingerprint}"));
-                    match task_signer.config.rpm.signing_tool {
-                        SigningTool::Sq => command.arg("--define").arg("_openpgp_sign sq"),
-                        SigningTool::Gpg => command
-                            .arg("--define")
-                            .arg("_openpgp_sign gpg")
-                            .arg("--define")
-                            .arg("_gpg_sign_cmd_extra_args --batch --pinentry-mode cancel"),
-                    };
-                    if task_signer.config.rpm.with_rpmv4 {
-                        command.arg("--rpmv4");
-                    }
-                    if let (Some(file_signing_key), Some(cert)) =
-                        (&file_signing_key, &ima_certificate)
-                    {
-                        let cert = openssl::x509::X509::from_pem(cert.certificate.as_bytes())?;
-                        let keyid = cert
-                            .subject_key_id()
-                            .ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "IMA certificate is missing a Subject Key Identifier extension"
-                                )
-                            })?
-                            .as_slice()
-                            .last_chunk::<4>()
-                            .map(|b| u32::from_be_bytes(*b))
-                            .ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "IMA certificate's Subject Key Identifier is too short"
-                                )
-                            })?;
-                        command
-                            .arg("--signfiles")
-                            .arg("--fskpath")
-                            .arg(format!(
-                                "pkcs11:model=Siguldry;token={};type=private",
-                                file_signing_key.siguldry_key
-                            ))
-                            .arg("--define")
-                            .arg(format!("_file_signing_key_id {keyid}"));
-                        tracing::debug!(
-                            siguldry_key = file_signing_key.siguldry_key,
-                            siguldry_cert = file_signing_key.siguldry_x509_cert,
-                            ima_keyid = keyid,
-                            "Signing RPM for IMA"
-                        );
-                    }
-                    let sign_start_time = std::time::Instant::now();
-                    let output = command
-                        .arg(&path)
-                        .output()
-                        .await
-                        .context("Failed to spawn rpmsign; is it installed?")?;
-                    let sign_time = sign_start_time.elapsed();
-                    crate::metrics_utils::rpms_sign_time().record(sign_time.as_secs() as f64);
-                    drop(signing_permit);
-
-                    if !output.status.success() {
-                        // rpmsign for whatever reason dumps every IMA hash to stderr, so this could be
-                        // 10K lines of nothing interesting.
-                        let stderr = String::from_utf8_lossy(&output.stderr)
-                            .lines()
-                            .take(15)
-                            .collect::<String>();
-                        tracing::error!(
-                            exit_code = ?output.status.code(),
-                            stdout = %String::from_utf8_lossy(&output.stdout),
-                            %stderr,
-                            "Signing command failed: '{command:?}'",
-                        );
-
-                        return Err(anyhow::anyhow!("Failed to run rpmsign"));
-                    } else {
-                        tracing::debug!(
-                            signing_command = ?command,
-                            "Successfully ran signing command"
-                        );
-                        let siguldry_key_ima = file_signing_key
-                            .as_ref()
-                            .map(|ima| ima.siguldry_key.as_str());
-                        tracing::info!(
-                            rpm.id,
-                            rpm.name,
-                            rpm.epoch = rpm.epoch.unwrap_or(0),
-                            rpm.version,
-                            rpm.release,
-                            rpm.arch,
-                            siguldry_key,
-                            siguldry_key_ima,
-                            "Successfully signed RPM"
-                        );
-                    }
-
-                    task_signer
-                        .koji
-                        .add_signature(rpm.id, expected_sigkey, path.to_path_buf())
-                        .await?;
-
-                    let _ = path.close().inspect_err(|error| {
-                        tracing::error!(?error, "Failed to remove RPM after signing");
-                    });
-                    drop(storage_permit);
-
-                    Ok::<_, anyhow::Error>(())
+                    let _signing_permit = signing_permit;
+                    let _storage_permit = storage_permit;
+                    call_rpmsign(
+                        task_signer,
+                        target_dir,
+                        rpm,
+                        siguldry_key,
+                        siguldry_cert,
+                        file_signing_key,
+                    )
+                    .await
                 }
-                .instrument(rpm_span),
+                .instrument(tracing::Span::current()),
             );
         }
 
@@ -415,13 +328,8 @@ impl<K: KojiOps> KojiSigner<K> {
         let mut rpm_failed = 0_u32;
         while let Some(task) = signing_tasks.join_next().await {
             match task {
-                Ok(Ok(())) => {
-                    tracing::trace!("RPM signing task joined successfully");
-                    crate::metrics_utils::rpms_signed().increment(1);
-                }
-                Ok(Err(error)) => {
-                    tracing::warn!(%error, "RPM signing task failed");
-                    crate::metrics_utils::rpms_failed().increment(1);
+                Ok(Ok(())) => {}
+                Ok(Err(_error)) => {
                     rpm_failed += 1;
                 }
                 Err(error) => {
@@ -467,6 +375,356 @@ impl<K: KojiOps> KojiSigner<K> {
 
         Ok(())
     }
+
+    #[instrument(skip_all, ret, fields(tag.name = tag.name))]
+    async fn sign_tag(
+        self,
+        tag: ResignTag,
+        resign_concurrency: Arc<Semaphore>,
+    ) -> anyhow::Result<()> {
+        let temp_dir = tempfile::Builder::new()
+            .permissions(Permissions::from_mode(0o700))
+            .prefix(&format!("re-sign-tag-{}-", tag.name))
+            .rand_bytes(16)
+            .tempdir_in(&self.config.rpm.working_directory)
+            .inspect_err(|error| {
+                tracing::error!(
+                    ?error,
+                    "Failed to make temporary directory inside {:?}",
+                    self.config.rpm.working_directory,
+                );
+            })?;
+
+        let cert = self
+            .signing_keys
+            .get(&tag.siguldry_key)
+            .and_then(|key| {
+                key.certificates
+                    .iter()
+                    .find(|cert| cert.name == tag.siguldry_openpgp_cert)
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Failed to find the OpenPGP certificate {} for signing key {}",
+                    tag.siguldry_openpgp_cert,
+                    tag.siguldry_key
+                )
+            })?;
+
+        let sigkey = koji_sigkey(cert);
+        let mut signing_tasks = tokio::task::JoinSet::new();
+
+        while let Ok(Some(chunk)) = self.koji.rpms_to_sign_in_tag(&tag.name, &sigkey).await {
+            for rpm in chunk.rpms_to_sign {
+                let work_dir = temp_dir.path().to_path_buf();
+                let task_signer = self.clone();
+                let siguldry_key = tag.siguldry_key.clone();
+                let siguldry_cert = tag.siguldry_openpgp_cert.clone();
+                let file_signing_key = tag.file_signing_key.clone();
+                let rpm_size_in_mb = rpm.size >> 20;
+                if let Some(storage_limit) = self.config.rpm.storage_limit_mb
+                    && rpm.size > (storage_limit * MB).try_into()?
+                {
+                    crate::metrics_utils::rpms_failed().increment(1);
+                    return Err(anyhow::anyhow!(
+                        "RPM is larger ({} MiB) than the configured storage limit ({} MiB) and cannot be signed",
+                        rpm.size >> 20,
+                        storage_limit
+                    ));
+                }
+
+                // Not-very-clever rate limit ahead.
+                //
+                // When there's a large number of builds that need signing and the signing and/or storage semaphores are
+                // all empty, we don't want to clog them up with lower-priority background tag signing. We avoid the async
+                // acquire() APIs because to do so would mean that we would join the queue of tasks waiting for a permit.
+                //
+                // Instead, we first acquire our "fake" semaphore so that when it's just the re-sign task and the service is
+                // otherwise quiet, we don't spin waiting for ourselves. After we have our internal semaphore, we poll the
+                // real semaphores at a modest interval until things are quiet enough for there to be spare permits.
+                //
+                // This means that we'll use all available signing resources when there are no builds, and stop dispatching
+                // requests once permits are exhausted. Builds _do_ use the acquire() flavor so they should be first to get
+                // permits as they become available.
+                //
+                // This is probably a good-enough approach to balance responsiveness with re-sign throughput, but alternatives
+                // like a second set of semaphores that ensure some percent of capacity remains available could be used.
+                let resign_permit = Arc::clone(&resign_concurrency).acquire_owned().await?;
+                let (signing_permit, storage_permit) = loop {
+                    let signing_permit =
+                        match Arc::clone(&task_signer.concurrency).try_acquire_owned() {
+                            Ok(signing_permit) => signing_permit,
+                            Err(TryAcquireError::NoPermits) => {
+                                tracing::info!("No free concurrency permits available to sign tag");
+                                tokio::time::sleep(Duration::from_secs(15)).await;
+                                continue;
+                            }
+                            Err(TryAcquireError::Closed) => {
+                                return Err(anyhow::anyhow!("Concurrency semaphore is closed"));
+                            }
+                        };
+                    let storage_permit = if let Some(storage_limit) = &task_signer.storage_limit {
+                        let permit_count = rpm_size_in_mb
+                            .max(1)
+                            .try_into()
+                            .expect("RPMs larger than 4 PiB aren't supported");
+                        match Arc::clone(storage_limit).try_acquire_many_owned(permit_count) {
+                            Ok(storage_permit) => Some(storage_permit),
+                            Err(TryAcquireError::NoPermits) => {
+                                drop(signing_permit);
+                                tracing::info!("No free storage permits available to sign tag");
+                                tokio::time::sleep(Duration::from_secs(15)).await;
+                                continue;
+                            }
+                            Err(TryAcquireError::Closed) => {
+                                return Err(anyhow::anyhow!("Storage semaphore is closed"));
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    break (signing_permit, storage_permit);
+                };
+
+                signing_tasks.spawn(
+                    async move {
+                        let _active_guard =
+                            Gauge::increment(crate::metrics_utils::rpms_resign_active(), 1_f64);
+                        let _resign_permit = resign_permit;
+                        let _signing_permit = signing_permit;
+                        let _storage_permit = storage_permit;
+                        call_rpmsign(
+                            task_signer,
+                            work_dir,
+                            rpm,
+                            siguldry_key,
+                            siguldry_cert,
+                            file_signing_key,
+                        )
+                        .await
+                    }
+                    .instrument(tracing::Span::current()),
+                );
+
+                // Drain any finished tasks
+                while let Some(result) = signing_tasks.try_join_next() {
+                    if let Some(error) = result.err() {
+                        tracing::error!(?error, "Tokio failed to join the tag signing task");
+                        crate::metrics_utils::rpms_failed().increment(1);
+                    }
+                }
+            }
+        }
+
+        // A bit of repeating ourselves to properly report metrics and ensure all pending tasks
+        // finish before we return since otherwise they'll be aborted quietly when the JoinSet drops.
+        if let Some(result) = signing_tasks.join_next().await
+            && let Some(error) = result.err()
+        {
+            tracing::error!(?error, "Tokio failed to join the tag signing task");
+            crate::metrics_utils::rpms_failed().increment(1);
+        }
+
+        Ok(())
+    }
+}
+
+async fn call_rpmsign<K: KojiOps>(
+    task_signer: KojiSigner<K>,
+    target_dir: PathBuf,
+    rpm: Rpm,
+    key_name: String,
+    cert_name: String,
+    file_signing_key: Option<Ima>,
+) -> anyhow::Result<()> {
+    match inner_call_rpmsign(
+        task_signer,
+        target_dir,
+        rpm,
+        key_name,
+        cert_name,
+        file_signing_key,
+    )
+    .await
+    {
+        Ok(()) => {
+            tracing::trace!("RPM signing completed successfully");
+            crate::metrics_utils::rpms_signed().increment(1);
+            Ok(())
+        }
+        Err(error) => {
+            tracing::warn!(%error, "RPM signing task failed");
+            crate::metrics_utils::rpms_failed().increment(1);
+            Err(error)
+        }
+    }
+}
+
+/// Issue the call to rpmsign.
+///
+/// Warning: This function does not handle acquiring the proper permits or metrics,
+/// and should not be called directly.
+#[instrument(name = "rpm", err, skip_all, fields(rpm.id = rpm.id))]
+async fn inner_call_rpmsign<K: KojiOps>(
+    task_signer: KojiSigner<K>,
+    target_dir: PathBuf,
+    rpm: Rpm,
+    key_name: String,
+    cert_name: String,
+    file_signing_key: Option<Ima>,
+) -> anyhow::Result<()> {
+    let cert = task_signer
+        .signing_keys
+        .get(&key_name)
+        .and_then(|key| key.certificates.iter().find(|cert| cert.name == cert_name))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Failed to find the OpenPGP certificate {} for signing key {}",
+                cert_name,
+                key_name,
+            )
+        })?;
+
+    let fingerprint = cert.fingerprint.clone();
+    let expected_sigkey = koji_sigkey(cert);
+    let siguldry_key = key_name;
+    let gpg_home = task_signer
+        .pgp_home
+        .gpg_homedirs
+        .get(&fingerprint)
+        .ok_or_else(|| {
+            anyhow::anyhow!("OpenPGP fingerprint {fingerprint} missing from gpg homedirs!")
+        })?
+        .to_owned();
+    let ima_certificate = file_signing_key
+        .as_ref()
+        .map(|ima| {
+            task_signer
+                .signing_keys
+                .get(&ima.siguldry_key)
+                .and_then(|k| {
+                    k.certificates
+                        .iter()
+                        .find(|c| c.name == ima.siguldry_x509_cert)
+                })
+        })
+        .ok_or_else(|| anyhow::anyhow!("The referenced IMA key couldn't be found!"))?
+        .cloned();
+
+    if file_signing_key.is_some() && ima_certificate.is_none() {
+        return Err(anyhow::anyhow!(
+            "The referenced IMA certificate couldn't be found!"
+        ));
+    }
+
+    let _active_guard = Gauge::increment(crate::metrics_utils::rpms_active(), 1_f64);
+    let path = download(&task_signer.http_client, target_dir, &rpm).await?;
+
+    let mut command = Command::new("rpmsign");
+    command
+        .kill_on_drop(true)
+        .env_clear()
+        .env("OPENSSL_CONF", &task_signer.pgp_home.openssl_config)
+        .env("GNUPGHOME", &gpg_home)
+        .env("SEQUOIA_HOME", &task_signer.pgp_home.sq_homedir)
+        .arg("--resign")
+        .arg(format!("--key-id={fingerprint}"));
+    match task_signer.config.rpm.signing_tool {
+        SigningTool::Sq => command.arg("--define").arg("_openpgp_sign sq"),
+        SigningTool::Gpg => command
+            .arg("--define")
+            .arg("_openpgp_sign gpg")
+            .arg("--define")
+            .arg("_gpg_sign_cmd_extra_args --batch --pinentry-mode cancel"),
+    };
+    if task_signer.config.rpm.with_rpmv4 {
+        command.arg("--rpmv4");
+    }
+    if let (Some(file_signing_key), Some(cert)) = (&file_signing_key, &ima_certificate) {
+        let cert = openssl::x509::X509::from_pem(cert.certificate.as_bytes())?;
+        let keyid = cert
+            .subject_key_id()
+            .ok_or_else(|| {
+                anyhow::anyhow!("IMA certificate is missing a Subject Key Identifier extension")
+            })?
+            .as_slice()
+            .last_chunk::<4>()
+            .map(|b| u32::from_be_bytes(*b))
+            .ok_or_else(|| {
+                anyhow::anyhow!("IMA certificate's Subject Key Identifier is too short")
+            })?;
+        command
+            .arg("--signfiles")
+            .arg("--fskpath")
+            .arg(format!(
+                "pkcs11:model=Siguldry;token={};type=private",
+                file_signing_key.siguldry_key
+            ))
+            .arg("--define")
+            .arg(format!("_file_signing_key_id {keyid}"));
+        tracing::debug!(
+            siguldry_key = file_signing_key.siguldry_key,
+            siguldry_cert = file_signing_key.siguldry_x509_cert,
+            ima_keyid = keyid,
+            "Signing RPM for IMA"
+        );
+    }
+    let sign_start_time = std::time::Instant::now();
+    let output = command
+        .arg(&path)
+        .output()
+        .await
+        .context("Failed to spawn rpmsign; is it installed?")?;
+    let sign_time = sign_start_time.elapsed();
+    crate::metrics_utils::rpms_sign_time().record(sign_time.as_secs() as f64);
+
+    if !output.status.success() {
+        // rpmsign for whatever reason dumps every IMA hash to stderr, so this could be
+        // 10K lines of nothing interesting.
+        let stderr = String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .take(15)
+            .collect::<String>();
+        tracing::error!(
+            exit_code = ?output.status.code(),
+            stdout = %String::from_utf8_lossy(&output.stdout),
+            %stderr,
+            "Signing command failed: '{command:?}'",
+        );
+
+        return Err(anyhow::anyhow!("Failed to run rpmsign"));
+    } else {
+        tracing::debug!(
+            signing_command = ?command,
+            "Successfully ran signing command"
+        );
+        let siguldry_key_ima = file_signing_key
+            .as_ref()
+            .map(|ima| ima.siguldry_key.as_str());
+        tracing::info!(
+            rpm.id,
+            rpm.name,
+            rpm.epoch = rpm.epoch.unwrap_or(0),
+            rpm.version,
+            rpm.release,
+            rpm.arch,
+            siguldry_key,
+            siguldry_key_ima,
+            "Successfully signed RPM"
+        );
+    }
+
+    task_signer
+        .koji
+        .add_signature(rpm.id, expected_sigkey, path.to_path_buf())
+        .await?;
+
+    let _ = path.close().inspect_err(|error| {
+        tracing::error!(?error, "Failed to remove RPM after signing");
+    });
+
+    Ok::<_, anyhow::Error>(())
 }
 
 #[instrument(skip_all, err(level = Level::WARN))]
@@ -620,7 +878,7 @@ mod tests {
 
     use crate::{
         config::Tag,
-        koji::{Build, TagEvent},
+        koji::{Build, RpmChunk, TagEvent},
     };
 
     use super::*;
@@ -660,6 +918,7 @@ mod tests {
         KojiSigner::new(
             Arc::new(config),
             Arc::new(Semaphore::new(4)),
+            None,
             Arc::new(pgp_home),
             Arc::new(signing_keys),
             http_client,
@@ -760,6 +1019,14 @@ mod tests {
             Ok(self.build.clone())
         }
 
+        async fn rpms_to_sign_in_tag(
+            &self,
+            _tag_name: &str,
+            _sigkey: &str,
+        ) -> anyhow::Result<Option<RpmChunk>> {
+            Ok(None)
+        }
+
         async fn add_signature(
             &self,
             rpm_id: i64,
@@ -800,6 +1067,7 @@ mod tests {
         KojiSigner::new(
             Arc::new(config),
             Arc::new(Semaphore::new(4)),
+            None,
             Arc::new(pgp_home),
             Arc::new(HashMap::new()),
             http_client,

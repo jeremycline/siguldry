@@ -44,6 +44,16 @@ siguldry_x509_cert = "fedora-45-ima-x509"
 from_regex = "(?P<sidetag>f45-build-side-[1-9][0-9]*)-signing-pending"
 to_template = "<sidetag>-testing-pending"
 
+[[koji.resign_tags]]
+name = "f45"
+siguldry_key = "fedora-46"
+siguldry_openpgp_cert = "fedora-46-openpgp"
+
+[koji.resign_tags.file_signing_key]
+siguldry_key = "fedora-46-ima"
+siguldry_x509_cert = "fedora-46-ima-x509"
+
+
 [rpm]
 signing_tool = "gpg"
 with_rpmv4 = true

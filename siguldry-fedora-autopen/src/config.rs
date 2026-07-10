@@ -229,6 +229,16 @@ pub struct Koji {
     pub readonly: bool,
     /// A list of tags which we should watch and autosign.
     pub tags: Vec<Tag>,
+
+    /// A list of tags which should be re-signed with a new key.
+    ///
+    /// A tag set here is queried in Koji for all RPMs in the given tag, and each RPM
+    /// is signed.
+    ///
+    /// Note: An RPM that has already been signed by the key configured in an entry is
+    /// not re-re-signed.
+    #[serde(default)]
+    pub resign_tags: Vec<ResignTag>,
 }
 
 impl Default for Koji {
@@ -239,6 +249,7 @@ impl Default for Koji {
             readonly: false,
             auth: Default::default(),
             tags: Default::default(),
+            resign_tags: Default::default(),
         }
     }
 }
@@ -325,6 +336,29 @@ pub struct Tag {
     /// Builds that match the side tag pattern will also be signed by the key
     /// used for this tag.
     pub sidetags: Option<SideTag>,
+}
+
+/// A Koji tag that should be (re)signed with a particular key.
+///
+/// Fedora regularly re-signs all the RPMs in a tag as a part of the normal branching
+/// workflow. This enables that workflow while co-operating with the day-to-day build
+/// signing.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResignTag {
+    /// The name of the Koji tag to re-sign.
+    pub name: String,
+
+    /// The name of the key in Siguldry to sign with
+    pub siguldry_key: String,
+
+    /// The name of the OpenPGP certificate associated with the key that
+    /// should be used when signing.
+    pub siguldry_openpgp_cert: String,
+
+    /// The PKCS #11 URI to use for IMA signatures.
+    ///
+    /// If not set, the RPM will not be signed for IMA. Requires RPM 6.1+.
+    pub file_signing_key: Option<Ima>,
 }
 
 /// IMA signing configuration.

@@ -24,6 +24,9 @@ const RPMS_SIGNED: &str = "rpms_signed";
 const RPMS_FAILED: &str = "rpms_failed";
 const RPMS_STORAGE: &str = "rpms_artifact_size";
 const RPMS_SIGN_TIME: &str = "rpms_sign_duration";
+const RPMS_RESIGN_ACTIVE: &str = "rpms_resign_active";
+const RPMS_RESIGN_QUERIED: &str = "rpms_resign_queried";
+const RPMS_RESIGN_MISSING_SIGNATURE: &str = "rpms_resign_missing_signature";
 
 const OSTREE_SIGN_TIME: &str = "ostree_sign_duration";
 const OSTREE_SIGNED: &str = "ostree_signed";
@@ -78,6 +81,28 @@ pub(crate) fn rpms_storage() -> Gauge {
 
 pub(crate) fn rpms_sign_time() -> Histogram {
     metrics::histogram!(RPMS_SIGN_TIME)
+}
+
+pub(crate) fn rpms_resign_active() -> Gauge {
+    metrics::gauge!(RPMS_RESIGN_ACTIVE)
+}
+
+pub(crate) fn rpms_resign_queried(koji_tag: String) -> Gauge {
+    metrics::gauge!(
+        description: "The number of RPMs in the tag that have been queried in Koji for a signature",
+        unit: metrics::Unit::Count,
+        RPMS_RESIGN_QUERIED,
+        "resign_koji_tag" => koji_tag,
+    )
+}
+
+pub(crate) fn rpms_resign_missing_signature(koji_tag: String) -> Gauge {
+    metrics::gauge!(
+        description: "The number of RPMs in the tag that have been found to need a new signature",
+        unit: metrics::Unit::Count,
+        RPMS_RESIGN_MISSING_SIGNATURE,
+        "resign_koji_tag" => koji_tag,
+    )
 }
 
 pub(crate) fn ostree_sign_time() -> Histogram {
@@ -164,11 +189,17 @@ pub(crate) fn init(config: &crate::config::Metrics) -> anyhow::Result<()> {
     )
     .absolute(0);
 
-    // RPM metrics
+    // General RPM metrics
     metrics::gauge!(
         description: "The number of RPMs currently being signed",
         unit: metrics::Unit::Count,
         RPMS_ACTIVE,
+    )
+    .set(0);
+    metrics::gauge!(
+        description: "The number of RPMs currently being signed that are part of a mass re-sign of a Koji tag",
+        unit: metrics::Unit::Count,
+        RPMS_RESIGN_ACTIVE,
     )
     .set(0);
     metrics::counter!(

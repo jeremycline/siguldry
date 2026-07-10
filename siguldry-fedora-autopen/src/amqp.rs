@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) Microsoft Corporation.
 
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use anyhow::Context;
 use lapin::{
-    BasicProperties, Channel, Connection, ConnectionProperties,
+    BasicProperties, Connection, ConnectionProperties,
     message::Delivery,
     options::{
         BasicAckOptions, BasicConsumeOptions, BasicNackOptions, BasicPublishOptions,
@@ -16,24 +16,17 @@ use lapin::{
 };
 use tokio::task::JoinSet;
 use tokio_stream::StreamExt;
-use tokio_util::sync::CancellationToken;
 use tracing::{Level, instrument};
 
-use crate::{config::Config, coreos, koji::KojiOps, ostree, rpmsign};
+use crate::{SignContext, coreos, koji::KojiOps, ostree, rpmsign};
 
 // Handle a single connection.
-pub async fn connect_and_consume<K: KojiOps>(
-    config: Arc<crate::config::Config>,
-    koji_signer: rpmsign::KojiSigner<K>,
-    ostree_signer: crate::ostree::OstreeSigner,
-    coreos_signer: coreos::CoreOsSigner,
-    halt_token: CancellationToken,
-) -> anyhow::Result<()> {
+pub async fn connect_and_consume<K: KojiOps>(sign_context: SignContext<K>) -> anyhow::Result<()> {
     let connection = tokio::select! {
-        connection = connect(&config.amqp) => {
+        connection = connect(&sign_context.config.amqp) => {
             connection
         }
-        _ = halt_token.cancelled() => {
+        _ = sign_context.halt_token.cancelled() => {
             tracing::info!("Aborting connection attempt and shutting down");
             return Ok(());
         }
@@ -46,18 +39,33 @@ pub async fn connect_and_consume<K: KojiOps>(
         .context("Failed to create AMQP channel")?;
     tracing::debug!(channel_id = channel.id(), "Channel established");
     channel
-        .basic_qos(config.amqp.prefetch_count, BasicQosOptions::default())
+        .basic_qos(
+            sign_context.config.amqp.prefetch_count,
+            BasicQosOptions::default(),
+        )
         .await
         .context("Failed to set channel QoS")?;
 
-    let queue_name = config.amqp.queue_name.clone().unwrap_or_default().into();
-    let queue_options = config.amqp.queue_options.clone().unwrap_or_default().into();
+    let queue_name = sign_context
+        .config
+        .amqp
+        .queue_name
+        .clone()
+        .unwrap_or_default()
+        .into();
+    let queue_options = sign_context
+        .config
+        .amqp
+        .queue_options
+        .clone()
+        .unwrap_or_default()
+        .into();
     let queue = channel
         .queue_declare(queue_name, queue_options, FieldTable::default())
         .await
         .context("Failed to declare queue")?;
     tracing::info!(queue = queue.name().as_str(), "Queue declared");
-    for binding in &config.amqp.bindings {
+    for binding in &sign_context.config.amqp.bindings {
         for routing_key in &binding.routing_keys {
             channel
                 .queue_bind(
@@ -86,41 +94,19 @@ pub async fn connect_and_consume<K: KojiOps>(
         .confirm_select(ConfirmSelectOptions { nowait: false })
         .await
         .context("Confirm select failed")?;
-    let sign_context = SignContext {
-        config,
-        publish_channel,
-        koji_signer,
-        ostree_signer,
-        coreos_signer,
-    };
-    consume(
-        channel,
-        queue.name().clone().to_string(),
-        halt_token.clone(),
-        sign_context,
-    )
-    .await?;
+    let sign_context = sign_context.with_amqp_channel(publish_channel);
+    consume(queue.name().clone().to_string(), sign_context).await?;
 
     Ok(())
 }
 
-#[derive(Clone)]
-struct SignContext<K: KojiOps> {
-    config: Arc<Config>,
-    publish_channel: Channel,
-    koji_signer: rpmsign::KojiSigner<K>,
-    ostree_signer: crate::ostree::OstreeSigner,
-    coreos_signer: coreos::CoreOsSigner,
-}
-
 async fn consume<K: KojiOps>(
-    channel: Channel,
     queue_name: String,
-    halt_token: CancellationToken,
     sign_context: SignContext<K>,
 ) -> anyhow::Result<()> {
     let consumer_options = BasicConsumeOptions::default();
-    let mut consumer = channel
+    let mut consumer = sign_context
+        .channel()
         .basic_consume(
             queue_name.into(),
             "siguldry-fedora-autopen".into(),
@@ -145,14 +131,14 @@ async fn consume<K: KojiOps>(
                 // Restart the loop occassionally so the active tasks are drained and metrics are accurate.
                 continue;
             }
-            _ = halt_token.cancelled() => {
+            _ = sign_context.halt_token.cancelled() => {
                 tracing::info!(pending_tasks=signing_tasks.len(), "Consumer halting, waiting for pending tasks to complete");
                 let result = signing_tasks.join_all().await.into_iter().collect::<Result<Vec<()>, anyhow::Error>>();
                 if let Err(error) = result {
                     tracing::error!(?error, "One or more signing tasks did not succeed and will be retried later");
                 }
 
-                if let Err(error) = channel.close(0, "Normal shutdown".into()).await {
+                if let Err(error) =  sign_context.channel().close(0, "Normal shutdown".into()).await {
                     tracing::error!(?error, "Failed to gracefully shut down the AMQP channel");
                 }
                 break;
@@ -407,8 +393,7 @@ async fn process_message<K: KojiOps>(
 
                             // Wrapped in a block to ensure the metrics are recorded properly
                             async {
-                                let confirm = sign_context
-                                    .publish_channel
+                                let confirm = sign_context.channel()
                                     .basic_publish(
                                         "amq.topic".into(),
                                         publish_topic,

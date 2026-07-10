@@ -36,6 +36,74 @@ mod rpmsign;
 const DEFAULT_CONFIG: &str = "fedora-autopen.toml";
 const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"),);
 
+#[derive(Clone)]
+struct SignContext<K: koji::KojiOps> {
+    pub config: Arc<config::Config>,
+    pub halt_token: CancellationToken,
+    pub channel: Option<lapin::Channel>,
+    pub koji_signer: rpmsign::KojiSigner<K>,
+    pub ostree_signer: crate::ostree::OstreeSigner,
+    pub coreos_signer: coreos::CoreOsSigner,
+}
+
+impl<K: koji::KojiOps> SignContext<K> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        config: Arc<config::Config>,
+        concurrency: Arc<Semaphore>,
+        storage_limit: Option<Arc<Semaphore>>,
+        pgp_home: Arc<PgpConfig>,
+        signing_keys: Arc<HashMap<String, Key>>,
+        http_client: reqwest::Client,
+        koji: K,
+        halt_token: CancellationToken,
+    ) -> anyhow::Result<Self> {
+        let koji_signer = rpmsign::KojiSigner::new(
+            Arc::clone(&config),
+            Arc::clone(&concurrency),
+            storage_limit.as_ref().map(Arc::clone),
+            Arc::clone(&pgp_home),
+            Arc::clone(&signing_keys),
+            http_client.clone(),
+            koji.clone(),
+        );
+        let ostree_signer = crate::ostree::OstreeSigner::new(
+            Arc::clone(&config),
+            Arc::clone(&concurrency),
+            Arc::clone(&pgp_home),
+            Arc::clone(&signing_keys),
+        );
+        let coreos_signer = coreos::CoreOsSigner::new(
+            Arc::clone(&config),
+            Arc::clone(&concurrency),
+            http_client.clone(),
+            Arc::clone(&pgp_home),
+            Arc::clone(&signing_keys),
+        )?;
+
+        Ok(SignContext {
+            config: config.clone(),
+            halt_token: halt_token.clone(),
+            channel: None,
+            koji_signer,
+            ostree_signer,
+            coreos_signer,
+        })
+    }
+
+    pub fn with_amqp_channel(mut self, channel: lapin::Channel) -> Self {
+        self.channel = Some(channel);
+        self
+    }
+
+    pub fn channel(&self) -> &lapin::Channel {
+        // TODO I guess make this a state machine so I can't mess this up
+        self.channel
+            .as_ref()
+            .expect("You must provide a channel to publish")
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let opts = cli::Cli::parse();
@@ -146,23 +214,12 @@ async fn main() -> anyhow::Result<()> {
         .retry(retry_policy)
         .build()?;
 
-    let max_concurrency = config.siguldry.concurrency.get();
-    let consumed_by_gpg = pgp_home.gpg_homedirs.len();
-    let concurrency = max_concurrency.saturating_sub(consumed_by_gpg);
-    tracing::info!(
-        "Signing will allow at most {} operations concurrently ({} connections consumed by gpg)",
-        concurrency,
-        consumed_by_gpg
-    );
-    let concurrency = Arc::new(Semaphore::new(concurrency));
-
     let result = match opts.command {
-        cli::Command::Consume => {
-            run_consumer(
+        cli::Command::Run => {
+            run(
                 config,
                 pgp_home,
                 signing_keys,
-                concurrency,
                 http_client,
                 koji_actor.handle(),
                 halt_token,
@@ -178,50 +235,57 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
-async fn run_consumer<K: koji::KojiOps>(
+async fn run<K: koji::KojiOps>(
     config: Arc<config::Config>,
     pgp_home: Arc<PgpConfig>,
     signing_keys: Arc<HashMap<String, Key>>,
-    concurrency: Arc<Semaphore>,
     http_client: reqwest::Client,
     koji: K,
     halt_token: CancellationToken,
 ) -> anyhow::Result<()> {
+    let max_concurrency = config.siguldry.concurrency.get();
+    let consumed_by_gpg = pgp_home.gpg_homedirs.len();
+    let concurrency = max_concurrency.saturating_sub(consumed_by_gpg);
+    tracing::info!(
+        "Signing will allow at most {} operations concurrently ({} connections consumed by gpg)",
+        concurrency,
+        consumed_by_gpg
+    );
+    let concurrency = Arc::new(Semaphore::new(concurrency));
+    let storage_limit = config
+        .rpm
+        .storage_limit_mb
+        .map(Semaphore::new)
+        .map(Arc::new);
+
+    let sign_context = SignContext::new(
+        Arc::clone(&config),
+        Arc::clone(&concurrency),
+        storage_limit.as_ref().map(Arc::clone),
+        Arc::clone(&pgp_home),
+        Arc::clone(&signing_keys),
+        http_client.clone(),
+        koji.clone(),
+        halt_token.clone(),
+    )?;
+    let resign_task = tokio::spawn(rpmsign::resign_tags(sign_context));
+
     loop {
         // All tasks spawned by these functions should be using `JoinSet` so they're aborted
         // on drop, which is why this is included inside the loop. If the connection fails we
         // want to abort all current work and start fresh.
-        let koji_signer = rpmsign::KojiSigner::new(
+        let sign_context = SignContext::new(
             Arc::clone(&config),
             Arc::clone(&concurrency),
+            storage_limit.as_ref().map(Arc::clone),
             Arc::clone(&pgp_home),
             Arc::clone(&signing_keys),
             http_client.clone(),
             koji.clone(),
-        );
-        let ostree_signer = crate::ostree::OstreeSigner::new(
-            Arc::clone(&config),
-            Arc::clone(&concurrency),
-            Arc::clone(&pgp_home),
-            Arc::clone(&signing_keys),
-        );
-        let coreos_signer = coreos::CoreOsSigner::new(
-            Arc::clone(&config),
-            Arc::clone(&concurrency),
-            http_client.clone(),
-            Arc::clone(&pgp_home),
-            Arc::clone(&signing_keys),
+            halt_token.clone(),
         )?;
 
-        if let Err(error) = amqp::connect_and_consume(
-            config.clone(),
-            koji_signer,
-            ostree_signer,
-            coreos_signer,
-            halt_token.clone(),
-        )
-        .await
-        {
+        if let Err(error) = amqp::connect_and_consume(sign_context).await {
             tracing::warn!(?error, "Restarting AMQP broker connection in 15 seconds...");
             tokio::time::sleep(Duration::from_secs(15)).await;
         } else {
@@ -231,6 +295,8 @@ async fn run_consumer<K: koji::KojiOps>(
 
         crate::metrics_utils::amqp_reconnects().increment(1);
     }
+
+    resign_task.await?;
 
     Ok(())
 }

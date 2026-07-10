@@ -4,6 +4,7 @@
 //! Utilities to work with Koji for RPM signing.
 
 use std::{
+    collections::HashMap,
     ffi::CStr,
     path::PathBuf,
     thread::{self, JoinHandle},
@@ -11,8 +12,8 @@ use std::{
 
 use anyhow::Context;
 use pyo3::{
-    FromPyObject, Python,
-    types::{PyAnyMethods, PyModule},
+    Bound, FromPyObject, Py, Python,
+    types::{PyAny, PyAnyMethods, PyIterator, PyModule},
 };
 use tokio::sync::{mpsc, oneshot};
 use tracing::instrument;
@@ -30,6 +31,13 @@ pub trait KojiOps: Clone + Send + Sync + 'static {
         &self,
         build_id: i64,
     ) -> impl std::future::Future<Output = anyhow::Result<Build>> + Send;
+
+    /// Retrieve the next chunk of RPMs in a tag that have not been signed by the provided key.
+    fn rpms_to_sign_in_tag(
+        &self,
+        tag_name: &str,
+        sigkey: &str,
+    ) -> impl std::future::Future<Output = anyhow::Result<Option<RpmChunk>>> + Send;
 
     /// Add a signature header to the RPM in Koji.
     fn add_signature(
@@ -119,6 +127,13 @@ enum KojiRequest {
     BuildInfo {
         build_id: i64,
     },
+    /// Request a list of RPMs in a tag that have not been signed by the provided key.
+    UnsignedChunk {
+        /// The tag to query for unsigned RPMs.
+        tag: String,
+        /// Filter out any RPMs that have a signature from this key.
+        sigkey: String,
+    },
     AddSignature {
         rpm_id: i64,
         expected_sigkey: String,
@@ -139,10 +154,127 @@ enum KojiRequest {
 #[derive(Debug)]
 enum KojiResponse {
     BuildInfo(anyhow::Result<Build>),
+    UnsignedChunk(anyhow::Result<Option<RpmChunk>>),
     AddSignature(anyhow::Result<()>),
     WriteSignedRpm(anyhow::Result<()>),
     /// Returns the task ID of the move task
     MoveBuild(anyhow::Result<i64>),
+}
+
+#[derive(Debug, Clone, Default, FromPyObject)]
+pub struct RpmChunk {
+    /// The name of the tag this re-signing operation belongs to
+    pub tag_name: String,
+    /// The sigkey being used for this re-signing operation
+    pub sigkey: String,
+    /// Total number of builds in the tag
+    pub total_builds: u64,
+    /// Number of builds per chunk
+    pub builds_in_chunk: u64,
+    /// Number of build chunks that have been fully processed.
+    pub build_chunks_processed: u64,
+    /// Number of RPMs in the current build chunk
+    pub rpms_in_build_chunk: u64,
+    /// Running total number of RPMs examined
+    pub rpms_processed: u64,
+    /// Running total of RPMs that have needed signing
+    pub rpms_missing_signature: u64,
+    /// List of RPMs that need to be signed in this chunk.
+    ///
+    /// This list may be empty, which simply means the current chunk
+    /// was all signed. We still yield this to allow metrics to be
+    /// reported and to have a reliable number of Koji queries between
+    /// yielding.
+    pub rpms_to_sign: Vec<Rpm>,
+}
+
+/// Tracks an iterator from the `rpms_to_sign_in_tag()` Python method
+/// in the koji_utils.py module.
+#[derive(Debug)]
+struct TagsToSign {
+    tags_to_sign: HashMap<(String, String), Py<PyIterator>>,
+    chunk_size: u32,
+}
+
+impl TagsToSign {
+    fn new(chunk_size: u32) -> Self {
+        Self {
+            tags_to_sign: HashMap::new(),
+            chunk_size,
+        }
+    }
+
+    fn next<'py>(
+        &mut self,
+        py: Python<'py>,
+        bound_client: &Bound<'py, PyAny>,
+        tag: String,
+        sigkey: String,
+    ) -> anyhow::Result<Option<RpmChunk>> {
+        let tag_and_sigkey = (tag.clone(), sigkey);
+        if !self.tags_to_sign.contains_key(&tag_and_sigkey) {
+            let generator = bound_client
+                .call_method1(
+                    "rpms_to_sign_in_tag",
+                    (&tag_and_sigkey.0, &tag_and_sigkey.1, self.chunk_size),
+                )
+                .context("Failed to call rpms_to_sign_in_tag")?;
+            let generator = PyIterator::from_object(&generator)
+                .context("Failed to convert rpms_to_sign_in_tag return to iterator")?
+                .unbind();
+            self.tags_to_sign.insert(tag_and_sigkey.clone(), generator);
+        }
+        let mut generator = self
+            .tags_to_sign
+            .get(&tag_and_sigkey)
+            .expect("The generator was just inserted")
+            .bind(py)
+            .to_owned();
+
+        let chunk = match generator.next() {
+            Some(Ok(chunk)) => {
+                let chunk = chunk
+                    .extract::<RpmChunk>()
+                    .context("Programmer error: failed to extract Koji RPM chunk")?;
+                crate::metrics_utils::rpms_resign_missing_signature(tag.clone())
+                    .set(chunk.rpms_missing_signature as f64);
+                crate::metrics_utils::rpms_resign_queried(tag.clone())
+                    .set(chunk.rpms_processed as f64);
+
+                tracing::info!(
+                    chunk.tag_name,
+                    chunk.sigkey,
+                    chunk.total_builds,
+                    chunk.builds_in_chunk,
+                    chunk.build_chunks_processed,
+                    chunk.rpms_in_build_chunk,
+                    "New chunk of RPMs from Koji successfully queried"
+                );
+
+                Some(chunk)
+            }
+            Some(Err(error)) => {
+                // If the iterator crashed, we don't want to resume it next go around, so
+                // drop it and start over. This might cause problems if it crashes very near
+                // the end and Koji returns the list of builds in a deterministic way.
+                drop(generator);
+                self.tags_to_sign.remove(&tag_and_sigkey);
+                tracing::error!(
+                    ?error,
+                    tag = &tag_and_sigkey.0,
+                    sigkey = &tag_and_sigkey.1,
+                    "Error while iterating tag to sign; restarting tag enumeration..."
+                );
+                return Err(error.into());
+            }
+            None => {
+                self.tags_to_sign.remove(&tag_and_sigkey);
+                None
+            }
+        };
+
+        Ok(chunk)
+    }
 }
 
 #[derive(Debug)]
@@ -188,6 +320,8 @@ impl KojiActor {
 
         let python_thread = thread::Builder::new()
             .spawn(move || {
+                let mut tags_to_sign = TagsToSign::new(1000);
+
                 while let Some((request, respond_to)) = rx.blocking_recv() {
                     let response = Python::attach(|py| {
                         // Be careful to not break out of this receive loop on errors.
@@ -202,6 +336,10 @@ impl KojiActor {
                                             .context("Failed to extract Koji Build")
                                     });
                                 KojiResponse::BuildInfo(result)
+                            }
+                            KojiRequest::UnsignedChunk { tag, sigkey } => {
+                                let result = tags_to_sign.next(py, bound_client, tag, sigkey);
+                                KojiResponse::UnsignedChunk(result)
                             }
                             KojiRequest::AddSignature {
                                 rpm_id,
@@ -296,6 +434,32 @@ impl KojiOps for KojiHandle {
 
         match rx.await.context("Python actor failed to respond")? {
             KojiResponse::BuildInfo(response) => response,
+            other => panic!("Programming error; actor responded with the wrong call: {other:?}"),
+        }
+    }
+
+    /// Get a chunk of RPMs that have not yet been signed by the provided `sigkey` in the given `tag_name`.
+    ///
+    /// Returns None when the query returns no more RPMs to sign.
+    #[instrument(skip(self), err)]
+    async fn rpms_to_sign_in_tag(
+        &self,
+        tag_name: &str,
+        sigkey: &str,
+    ) -> anyhow::Result<Option<RpmChunk>> {
+        let (tx, rx) = oneshot::channel();
+        self.inner
+            .send((
+                KojiRequest::UnsignedChunk {
+                    tag: tag_name.to_owned(),
+                    sigkey: sigkey.to_owned(),
+                },
+                tx,
+            ))
+            .await?;
+
+        match rx.await.context("Python actor failed to respond")? {
+            KojiResponse::UnsignedChunk(response) => response,
             other => panic!("Programming error; actor responded with the wrong call: {other:?}"),
         }
     }
