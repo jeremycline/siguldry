@@ -11,10 +11,13 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::mpsc,
+    sync::{mpsc, oneshot},
 };
 use tokio_openssl::SslStream;
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tokio_util::{
+    sync::CancellationToken,
+    task::{AbortOnDropHandle, TaskTracker},
+};
 use tracing::{Instrument, instrument};
 use uuid::Uuid;
 use zerocopy::{IntoBytes, TryFromBytes};
@@ -23,6 +26,69 @@ use crate::{
     config::Credentials,
     protocol::{self, BridgeStatus, ProtocolAck, Role, peer_common_name},
 };
+
+type Connection = (SslStream<TcpStream>, SocketAddr);
+
+/// A connection from the client or server which hasn't been bridged.
+///
+/// A task will poll the connection until the user calls [`PendingConnection::take`] which
+/// will return None if the connection is no longer alive.
+struct PendingConnection {
+    remote_addr: SocketAddr,
+    take_tx: oneshot::Sender<()>,
+    connection_watcher: AbortOnDropHandle<Option<Connection>>,
+}
+
+impl PendingConnection {
+    fn new(connection: Connection, role: Role) -> Self {
+        let (mut stream, remote_addr) = connection;
+        let (take_tx, take_rx) = oneshot::channel();
+
+        let connection_watcher = AbortOnDropHandle::new(tokio::spawn(async move {
+            // At this point we haven't sent the ProtocolAck, so the connection should never receive anything.
+            // If it does, or if they disconnect before the connection is claimed, we'll drop the connection.
+            let mut unexpected_data = [0_u8; 1];
+            tokio::select! {
+                result = stream.read(&mut unexpected_data) => {
+                    match result {
+                        Ok(0) => tracing::info!(?remote_addr, ?role, "Pending connection closed"),
+                        Ok(_) => tracing::error!(?remote_addr, ?role, "Pending connection sent data before it was bridged"),
+                        Err(error) => tracing::info!(?error, ?remote_addr, ?role, "Pending connection disconnected"),
+                    }
+                    None
+                }
+                result = take_rx => {
+                    result.ok().map(|_| (stream, remote_addr))
+                }
+            }
+        }));
+
+        Self {
+            remote_addr,
+            take_tx,
+            connection_watcher,
+        }
+    }
+
+    /// Take the pending connection.
+    ///
+    /// Returns None if the connection has been dropped, closed, or the tokio task watching the connection
+    /// failed to join.
+    async fn take(self) -> Option<Connection> {
+        self.take_tx.send(()).ok()?;
+        tokio::time::timeout(Duration::from_secs(1), self.connection_watcher)
+            .await
+            .map(Result::ok)
+            .ok()??
+    }
+
+    async fn shutdown(self) {
+        if let Some((mut conn, remote_addr)) = self.take().await {
+            tracing::trace!(?remote_addr, "Cancelling pending connection");
+            let _ = tokio::time::timeout(Duration::from_secs(3), conn.shutdown()).await;
+        }
+    }
+}
 
 /// Configuration for the siguldry bridge.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,10 +197,8 @@ async fn inner_listen(
         .context("failed to create TLS configuration from configured credentials")?;
     let request_tracker = TaskTracker::new();
 
-    let (server_conns_tx, mut server_conns_rx) =
-        mpsc::channel::<(SslStream<TcpStream>, SocketAddr)>(128);
-    let (client_conns_tx, mut client_conns_rx) =
-        mpsc::channel::<(SslStream<TcpStream>, SocketAddr)>(128);
+    let (server_conns_tx, mut server_conns_rx) = mpsc::channel::<PendingConnection>(128);
+    let (client_conns_tx, mut client_conns_rx) = mpsc::channel::<PendingConnection>(128);
 
     let server_acceptor_halt = halt_token.clone();
     let server_tls_config = tls_config.clone();
@@ -151,7 +215,7 @@ async fn inner_listen(
                 },
                 maybe_conn = accept_conn(&server_listener, Ssl::new(tls_config.context())?, Role::Server) => {
                     match maybe_conn {
-                        Ok(conn) => server_conns_tx.send(conn).await?,
+                        Ok(conn) => server_conns_tx.send(PendingConnection::new(conn, Role::Server)).await?,
                         Err(error) => tracing::warn!(?error, "Failed to accept new server connection"),
                     }
                 }
@@ -172,7 +236,7 @@ async fn inner_listen(
                 },
                 maybe_conn = accept_conn(&client_listener, Ssl::new(tls_config.context())?, Role::Client) => {
                     match maybe_conn {
-                        Ok(conn) => client_conns_tx.send(conn).await?,
+                        Ok(conn) => client_conns_tx.send(PendingConnection::new(conn, Role::Client)).await?,
                         Err(error) => tracing::warn!(?error, "Failed to accept new client connection"),
                     }
                 }
@@ -181,33 +245,58 @@ async fn inner_listen(
         Ok::<_, anyhow::Error>(())
     });
 
+    let mut pending_client = None;
+    let mut pending_server = None;
     'accept: loop {
         tokio::select! {
             _ = halt_token.cancelled() => {
                 tracing::info!("Shutdown requested, no new requests will be bridged");
                 break 'accept;
             },
-            connections = async { tokio::join!(client_conns_rx.recv(), server_conns_rx.recv()) } => {
-                if let (Some(client_conn), Some(server_conn)) = connections {
-                    let ack = protocol::ProtocolAck::new(protocol::BridgeStatus::Ok);
-                    request_tracker.spawn(
-                        bridge(ack, client_conn, server_conn).instrument(tracing::Span::current()),
-                    );
-
+            connection = client_conns_rx.recv(), if pending_client.is_none() => {
+                if let Some(connection) = connection {
+                    pending_client = Some(connection);
                 } else {
                     tracing::info!("Channels for incoming connections closed; beginning shutdown");
                     break 'accept;
-
+                }
+            }
+            connection = server_conns_rx.recv(), if pending_server.is_none() => {
+                if let Some(connection) = connection {
+                    pending_server = Some(connection);
+                } else {
+                    tracing::info!("Channels for incoming connections closed; beginning shutdown");
+                    break 'accept;
                 }
             }
         }
+
+        if let Some(client_conn) = pending_client.take()
+            && let Some(server_conn) = pending_server.take()
+        {
+            let Some(server_conn) = server_conn.take().await else {
+                pending_client = Some(client_conn);
+                continue;
+            };
+            let Some(client_conn) = client_conn.take().await else {
+                pending_server = Some(PendingConnection::new(server_conn, Role::Server));
+                continue;
+            };
+
+            let ack = protocol::ProtocolAck::new(protocol::BridgeStatus::Ok);
+            request_tracker
+                .spawn(bridge(ack, client_conn, server_conn).instrument(tracing::Span::current()));
+        }
     }
 
-    while let Some((_conn, remote_addr)) = client_conns_rx.recv().await {
-        tracing::trace!(?remote_addr, "Cancelling pending client connection");
+    drop(pending_client);
+    drop(pending_server);
+    while let Some(connection) = client_conns_rx.recv().await {
+        tracing::info!(?connection.remote_addr, "Cancelling client connection that was pending as the service is shutting down");
+        request_tracker.spawn(connection.shutdown());
     }
-    while let Some((_conn, remote_addr)) = server_conns_rx.recv().await {
-        tracing::trace!(?remote_addr, "Cancelling pending server connection");
+    while let Some(connection) = server_conns_rx.recv().await {
+        request_tracker.spawn(connection.shutdown());
     }
 
     request_tracker.close();

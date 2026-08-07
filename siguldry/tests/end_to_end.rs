@@ -3,10 +3,13 @@
 
 #![cfg(feature = "server")]
 
+use std::time::Duration;
+
 use siguldry::{
     client::{self, ProxyClient},
     error::{ClientError, ConnectionError, ProtocolError, ServerError},
     protocol::DigestAlgorithm,
+    server::service::Server,
 };
 
 use siguldry_test::{InstanceBuilder, create_credentials, keys};
@@ -111,6 +114,29 @@ async fn bridge_rejects_client_cert_empty_common_name() -> anyhow::Result<()> {
     }
 
     instance.halt().await?;
+    Ok(())
+}
+
+// Assert that the bridge doesn't use stale server connections when bridging
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn bridge_discards_connections_from_restarted_server() -> anyhow::Result<()> {
+    let mut instance = InstanceBuilder::new().build().await?;
+
+    // Not ideal, but we need to wait a bit for the server to start connecting to the bridge.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    instance.server.halt().await?;
+    instance.server = Server::new(instance.server_config.clone()).await?.run();
+
+    assert_eq!(instance.client.who_am_i().await?, "siguldry-client");
+
+    instance.halt().await?;
+
+    assert!(logs_contain("Pending connection closed"));
+    assert!(!logs_contain("Connection to server failed"));
+    assert!(!logs_contain("early eof"));
+
     Ok(())
 }
 

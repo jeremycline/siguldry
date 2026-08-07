@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- The bridge now checks that the server/client connection is not dead before bridging.
+  This was commonly seen when restarting the server without restarting the bridge, which
+  would result in the client failing the first few requests while the stale connections
+  were slowly drained (#250)
+
 
 ## [0.8.0] - 2026-07-09
 

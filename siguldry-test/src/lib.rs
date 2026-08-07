@@ -100,6 +100,7 @@ pub async fn create_credentials(
 #[allow(dead_code)]
 pub struct Instance {
     pub server: server::service::Listener,
+    pub server_config: server::Config,
     pub bridge: bridge::Listener,
     pub client: client::Client,
     pub creds: Creds,
@@ -620,7 +621,7 @@ impl InstanceBuilder {
             (halt_token, signer)
         };
 
-        let server = server::service::Server::new(server_config).await?;
+        let server = server::service::Server::new(server_config.clone()).await?;
         let server = server.run();
 
         let mut keys = vec![];
@@ -679,6 +680,7 @@ impl InstanceBuilder {
 
         Ok(Instance {
             server,
+            server_config,
             bridge,
             client,
             creds,
