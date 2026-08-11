@@ -217,7 +217,7 @@ pub enum KeyCommands {
     /// the "associate-hybrid" subcommand.
     Create {
         /// The key algorithm to use.
-        #[arg(short, long, value_enum, default_value_t)]
+        #[arg(short, long, value_enum, default_value_t, ignore_case = true)]
         algorithm: KeyAlgorithm,
 
         /// A file containing the password needed to unlock and use the key.
@@ -234,6 +234,21 @@ pub enum KeyCommands {
 
         /// The name of the key in Siguldry.
         name: String,
+    },
+
+    /// Associate two keys as a hybrid key pair.
+    ///
+    /// For hybrid signature schemes that include a "traditional" and "post-quantum" signature,
+    /// two key pairs are associated with each other.
+    ///
+    /// Not all keys can be associated with each other:
+    ///
+    /// - Keys must not already be part of a hybrid pair
+    /// - ML-DSA-65 keys can only be paired with Ed25519 keys
+    /// - ML-DSA-87 keys can only be paired with Ed448 keys
+    AssociateHybrid {
+        first_key_name: String,
+        second_key_name: String,
     },
 
     /// Create an x509 certificates for a key.
@@ -321,6 +336,15 @@ pub enum KeyCommands {
         /// If this option is not provided, input is read from stdin.
         #[arg(long, default_value = None)]
         password_file: Option<PathBuf>,
+
+        /// A file containing the password needed to unlock and use the key's hybrid pair.
+        ///
+        /// If the key is not part of a hybrid pair, this argument is ignored.
+        ///
+        /// The file should include the password on the first line and the file should include a newline.
+        /// If this option is not provided, input is read from stdin.
+        #[arg(long, default_value = None)]
+        hybrid_password_file: Option<PathBuf>,
 
         /// A file containing the PIN for the PKCS#11 token used in binding (if any).
         ///
@@ -424,4 +448,44 @@ pub enum UserCommands {
 
     /// List all users in the database.
     List {},
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_algorithm_is_case_insensitive() {
+        for (value, expected) in [
+            ("RSA2K", KeyAlgorithm::Rsa2K),
+            ("RSA4K", KeyAlgorithm::Rsa4K),
+            ("P256", KeyAlgorithm::P256),
+            ("ED25519", KeyAlgorithm::Ed25519),
+            ("ED448", KeyAlgorithm::Ed448),
+            ("MLDSA65", KeyAlgorithm::Mldsa65),
+            ("MLDSA87", KeyAlgorithm::Mldsa87),
+        ] {
+            for value in [value, value.to_lowercase().as_str()] {
+                let cli = Cli::try_parse_from([
+                    "siguldry-server",
+                    "manage",
+                    "key",
+                    "create",
+                    "--algorithm",
+                    value,
+                    "admin",
+                    "key-name",
+                ])
+                .unwrap();
+
+                match cli.command {
+                    Command::Manage(ManagementCommands::Key(KeyCommands::Create {
+                        algorithm,
+                        ..
+                    })) => assert_eq!(algorithm, expected),
+                    _ => panic!("Incorrect command"),
+                }
+            }
+        }
+    }
 }

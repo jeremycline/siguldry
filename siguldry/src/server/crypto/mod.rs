@@ -12,7 +12,7 @@ use openssl::{
     bn::{BigNum, BigNumContext},
     ec::{EcGroup, EcKey},
     nid::Nid,
-    pkey::{PKey, Private},
+    pkey::{KeyType as OpenSSLKeyType, PKey, Private},
     rsa::Rsa,
     symm::Cipher,
     x509,
@@ -72,6 +72,18 @@ pub fn create_encrypted_key(
         KeyAlgorithm::P256 => PKey::from_ec_key(EcKey::generate(
             EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)?.as_ref(),
         )?)?,
+        KeyAlgorithm::Ed25519 => PKey::generate_ed25519()?,
+        KeyAlgorithm::Ed448 => PKey::generate_ed448()?,
+        KeyAlgorithm::Mldsa65 => {
+            let mut seed = [0; 32];
+            openssl::rand::rand_priv_bytes(seed.as_mut_slice())?;
+            PKey::private_key_from_seed(None, openssl::pkey::KeyType::ML_DSA_65, None, &seed)?
+        }
+        KeyAlgorithm::Mldsa87 => {
+            let mut seed = [0; 32];
+            openssl::rand::rand_priv_bytes(seed.as_mut_slice())?;
+            PKey::private_key_from_seed(None, openssl::pkey::KeyType::ML_DSA_87, None, &seed)?
+        }
     };
     let public_key_pem = String::from_utf8(key.public_key_to_pem()?)?;
     let handle = hex::encode_upper(openssl::hash::hash(
@@ -91,27 +103,58 @@ pub fn create_encrypted_key(
     })
 }
 
-/// Generate an OpenPGP certificate for the provided key.
-pub fn openpgp_cert_for_key(
-    config: &crate::server::Config,
-    key: &db::Key,
-    key_password: Password,
-    user_id: packet::UserID,
+fn openssl_to_openpgp(
+    openssl_key: PKey<Private>,
+    hybrid_key: Option<PKey<Private>>,
     profile: Profile,
-    hash_algorithm: sequoia_openpgp::types::HashAlgorithm,
-    validity_days: u32,
-) -> anyhow::Result<String> {
-    let key_material = key
-        .key_material
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("PKCS#11-backed OpenPGP keys aren't yet supported"))?;
-    let key_pem = binding::unbind_with_pkcs11(&config.pkcs11_bindings, key_material)?;
-    let openssl_key = key_password
-        .map(|passphrase| PKey::private_key_from_pem_passphrase(key_pem.as_bytes(), passphrase))?;
-    let validity =
-        (validity_days > 0).then(|| Duration::from_secs(u64::from(validity_days) * 24 * 60 * 60));
+) -> anyhow::Result<(
+    mpi::PublicKey,
+    mpi::SecretKeyMaterial,
+    sequoia_openpgp::types::PublicKeyAlgorithm,
+)> {
+    // Brace yourself for the most wild combination of unwieldy APIs.
+    //
+    // OpenSSL doesn't seem to have a way to get the key type so you have to do this
+    // absurd probing with `is_a()`. Sequoia doesn't let us get the private key material
+    // back or combine it into a hybrid key after building the individual keys so we have
+    // to build a pontential hybrid pair up front, we can't just turn two OpenSSL keys to
+    // Sequoia types and deal with the hybrid bit later.
+    //
+    // Please, save me.
 
-    let (public, secret, alorithm) = if let Ok(rsa) = openssl_key.rsa() {
+    // First, figure out if the hybrid key is an acceptable type. "Acceptable" just means
+    // it's a key pair that the OpenPGP RFC defines, which for now is ML-DSA-65+Ed25519,
+    // or ML-DSA-87+Ed448.
+    let (traditional_openssl_key, pqc_openssl_key) = if let Some(hybrid_key) = hybrid_key {
+        let (traditional_key, maybe_pqc_key) = if openssl_key.is_a(OpenSSLKeyType::ED25519)
+            || openssl_key.is_a(OpenSSLKeyType::ED448)
+        {
+            Ok((openssl_key, hybrid_key))
+        } else if hybrid_key.is_a(OpenSSLKeyType::ED25519) || hybrid_key.is_a(OpenSSLKeyType::ED448)
+        {
+            Ok((hybrid_key, openssl_key))
+        } else {
+            Err(anyhow::anyhow!(
+                "Hybrid pairs require one key to be either Ed25519 or Ed448"
+            ))
+        }?;
+
+        if (traditional_key.is_a(OpenSSLKeyType::ED25519)
+            && maybe_pqc_key.is_a(OpenSSLKeyType::ML_DSA_65))
+            || (traditional_key.is_a(OpenSSLKeyType::ED448)
+                && maybe_pqc_key.is_a(OpenSSLKeyType::ML_DSA_87))
+        {
+            Ok((traditional_key, Some(maybe_pqc_key)))
+        } else {
+            Err(anyhow::anyhow!(
+                "The only valid hybrid key pair combinations are ML-DSA-65 with Ed25519, or ML-DSA-87 with Ed448"
+            ))
+        }
+    } else {
+        Ok((openssl_key, None))
+    }?;
+
+    if let Ok(rsa) = traditional_openssl_key.rsa() {
         let p = rsa
             .p()
             .ok_or_else(|| anyhow::anyhow!("Generated RSA key is missing p"))?;
@@ -133,12 +176,12 @@ pub fn openpgp_cert_for_key(
             n: rsa.n().to_vec().into(),
         };
 
-        (
+        Ok((
             public,
             secret,
             sequoia_openpgp::types::PublicKeyAlgorithm::RSAEncryptSign,
-        )
-    } else if let Ok(ec) = openssl_key.ec_key() {
+        ))
+    } else if let Ok(ec) = traditional_openssl_key.ec_key() {
         let secret = mpi::SecretKeyMaterial::ECDSA {
             scalar: mpi::ProtectedMPI::from(ec.private_key().to_vec()),
         };
@@ -153,26 +196,204 @@ pub fn openpgp_cert_for_key(
             q: mpi::MPI::from(public),
         };
 
-        (
+        Ok((
             public,
             secret,
             sequoia_openpgp::types::PublicKeyAlgorithm::ECDSA,
-        )
+        ))
+    } else if traditional_openssl_key.is_a(openssl::pkey::KeyType::ED25519) {
+        if profile != Profile::RFC9580 {
+            // RFC 4880 makes no mention of Ed25519, although GPG does support generating Curve 25519 keys
+            // and Sequoia does have an EdDSA variant. We only care about these keys for hybrid key pairs,
+            // though, so I don't think it matters much.
+            return Err(anyhow::anyhow!(
+                "Ed25519 OpenPGP keys are only supported with RFC 9580 profile"
+            ));
+        }
+
+        let ed25519_public_key = traditional_openssl_key
+            .raw_public_key()?
+            .try_into()
+            .map_err(|e: Vec<u8>| {
+                anyhow::anyhow!(
+                    "Expected a 32-byte Ed25519 public key, got {} bytes",
+                    e.len()
+                )
+            })?;
+        let ed25519_private_key = sequoia_openpgp::crypto::mem::Protected::from(
+            traditional_openssl_key.raw_private_key()?,
+        );
+
+        if let Some(hybrid_key) = pqc_openssl_key {
+            // We checked this above but this is all a mess so maybe we missed something.
+            assert!(hybrid_key.is_a(openssl::pkey::KeyType::ML_DSA_65));
+            let mut mldsa_private_key_seed = ossl::OsslSecret::new(32);
+            let seed_length = hybrid_key.seed_into(&mut mldsa_private_key_seed)?;
+            if seed_length != 32 {
+                return Err(anyhow::anyhow!(
+                    "Expected a 32-byte key seed, got {seed_length} bytes"
+                ));
+            }
+            let mldsa_public_key: [u8; 1952] =
+                hybrid_key
+                    .raw_public_key()?
+                    .try_into()
+                    .map_err(|e: Vec<u8>| {
+                        anyhow::anyhow!(
+                            "ML-DSA-65 public key was expected to be 1952 bytes, was {}",
+                            e.len()
+                        )
+                    })?;
+            Ok((
+                mpi::PublicKey::MLDSA65_Ed25519 {
+                    eddsa: Box::new(ed25519_public_key),
+                    mldsa: Box::new(mldsa_public_key),
+                },
+                mpi::SecretKeyMaterial::MLDSA65_Ed25519 {
+                    eddsa: ed25519_private_key,
+                    mldsa: mldsa_private_key_seed.into(),
+                },
+                sequoia_openpgp::types::PublicKeyAlgorithm::MLDSA65_Ed25519,
+            ))
+        } else {
+            Ok((
+                mpi::PublicKey::Ed25519 {
+                    a: ed25519_public_key,
+                },
+                mpi::SecretKeyMaterial::Ed25519 {
+                    x: ed25519_private_key,
+                },
+                sequoia_openpgp::types::PublicKeyAlgorithm::Ed25519,
+            ))
+        }
+    } else if traditional_openssl_key.is_a(openssl::pkey::KeyType::ED448) {
+        if profile != Profile::RFC9580 {
+            return Err(anyhow::anyhow!(
+                "Ed448 OpenPGP keys are only supported with RFC 9580 profile"
+            ));
+        }
+
+        let ed448_public_key = traditional_openssl_key
+            .raw_public_key()?
+            .try_into()
+            .map_err(|e: Vec<u8>| {
+                anyhow::anyhow!("Expected a 57-byte Ed448 public key, got {} bytes", e.len())
+            })?;
+        let ed448_private_key = sequoia_openpgp::crypto::mem::Protected::from(
+            traditional_openssl_key.raw_private_key()?,
+        );
+
+        if let Some(hybrid_key) = pqc_openssl_key {
+            assert!(hybrid_key.is_a(openssl::pkey::KeyType::ML_DSA_87));
+            let mut mldsa_private_key_seed = ossl::OsslSecret::new(32);
+            let seed_length = hybrid_key.seed_into(&mut mldsa_private_key_seed)?;
+            if seed_length != 32 {
+                return Err(anyhow::anyhow!(
+                    "Expected a 32-byte key seed, got {seed_length} bytes"
+                ));
+            }
+            let mldsa_public_key =
+                hybrid_key
+                    .raw_public_key()?
+                    .try_into()
+                    .map_err(|e: Vec<u8>| {
+                        anyhow::anyhow!(
+                            "ML-DSA-87 public key was expected to be 2592 bytes, was {}",
+                            e.len()
+                        )
+                    })?;
+            Ok((
+                mpi::PublicKey::MLDSA87_Ed448 {
+                    eddsa: ed448_public_key,
+                    mldsa: mldsa_public_key,
+                },
+                mpi::SecretKeyMaterial::MLDSA87_Ed448 {
+                    eddsa: ed448_private_key,
+                    mldsa: mldsa_private_key_seed.into(),
+                },
+                sequoia_openpgp::types::PublicKeyAlgorithm::MLDSA87_Ed448,
+            ))
+        } else {
+            Ok((
+                mpi::PublicKey::Ed448 {
+                    a: ed448_public_key,
+                },
+                mpi::SecretKeyMaterial::Ed448 {
+                    x: ed448_private_key,
+                },
+                sequoia_openpgp::types::PublicKeyAlgorithm::Ed448,
+            ))
+        }
     } else {
-        return Err(anyhow::anyhow!("Unsupported key type"));
+        Err(anyhow::anyhow!("Unsupported key type"))
+    }
+}
+
+/// Generate an OpenPGP certificate for the provided key.
+pub fn openpgp_cert_for_key(
+    config: &crate::server::Config,
+    key_with_password: (&db::Key, Password),
+    hybrid_key_with_password: Option<(&db::Key, Password)>,
+    user_id: packet::UserID,
+    profile: Profile,
+    hash_algorithm: sequoia_openpgp::types::HashAlgorithm,
+    validity_days: u32,
+) -> anyhow::Result<String> {
+    let (key, key_password) = key_with_password;
+    let key_material = key
+        .key_material
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("PKCS#11-backed OpenPGP keys aren't yet supported"))?;
+    let key_pem = binding::unbind_with_pkcs11(&config.pkcs11_bindings, key_material)?;
+    let openssl_key = key_password
+        .map(|passphrase| PKey::private_key_from_pem_passphrase(key_pem.as_bytes(), passphrase))?;
+
+    let openssl_hybrid_key = if let Some((key, key_password)) = hybrid_key_with_password {
+        let key_material = key
+            .key_material
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("PKCS#11-backed OpenPGP keys aren't yet supported"))?;
+        let key_pem = binding::unbind_with_pkcs11(&config.pkcs11_bindings, key_material)?;
+        let openssl_hybrid_key = key_password.map(|passphrase| {
+            PKey::private_key_from_pem_passphrase(key_pem.as_bytes(), passphrase)
+        })?;
+        Some(openssl_hybrid_key)
+    } else {
+        None
     };
 
+    let (public, secret, algorithm) = openssl_to_openpgp(openssl_key, openssl_hybrid_key, profile)?;
+    let validity =
+        (validity_days > 0).then(|| Duration::from_secs(u64::from(validity_days) * 24 * 60 * 60));
     let creation_time = std::time::SystemTime::now();
     let key: packet::key::Key<packet::key::SecretParts, packet::key::PrimaryRole> = match profile {
         Profile::RFC9580 => {
-            packet::key::Key6::with_secret(creation_time, alorithm, public, secret.into())?.into()
+            packet::key::Key6::with_secret(creation_time, algorithm, public, secret.into())?.into()
         }
         Profile::RFC4880 => {
-            packet::key::Key4::with_secret(creation_time, alorithm, public, secret.into())?.into()
+            packet::key::Key4::with_secret(creation_time, algorithm, public, secret.into())?.into()
         }
         _ => return Err(anyhow::anyhow!("Unsupported OpenPGP profile")),
     };
     let key_packet = packet::Packet::SecretKey(key.clone());
+
+    let preferred_hashes = match profile {
+        Profile::RFC9580 => vec![
+            sequoia_openpgp::types::HashAlgorithm::SHA3_512,
+            sequoia_openpgp::types::HashAlgorithm::SHA3_256,
+            sequoia_openpgp::types::HashAlgorithm::SHA512,
+            sequoia_openpgp::types::HashAlgorithm::SHA256,
+        ],
+        Profile::RFC4880 => vec![
+            sequoia_openpgp::types::HashAlgorithm::SHA512,
+            sequoia_openpgp::types::HashAlgorithm::SHA256,
+        ],
+        _ => return Err(anyhow::anyhow!("Unsupported OpenPGP profile")),
+    };
+    let preferred_symmetric_algorithms = vec![
+        sequoia_openpgp::types::SymmetricAlgorithm::AES256,
+        sequoia_openpgp::types::SymmetricAlgorithm::AES128,
+    ];
 
     let builder = packet::signature::SignatureBuilder::new(SignatureType::DirectKey)
         .set_hash_algo(hash_algorithm)
@@ -180,14 +401,8 @@ pub fn openpgp_cert_for_key(
         .set_key_flags(KeyFlags::empty().set_signing().set_certification())?
         .set_features(sequoia_openpgp::types::Features::sequoia())?
         .set_key_validity_period(validity)?
-        .set_preferred_hash_algorithms(vec![
-            sequoia_openpgp::types::HashAlgorithm::SHA512,
-            sequoia_openpgp::types::HashAlgorithm::SHA256,
-        ])?
-        .set_preferred_symmetric_algorithms(vec![
-            sequoia_openpgp::types::SymmetricAlgorithm::AES256,
-            sequoia_openpgp::types::SymmetricAlgorithm::AES128,
-        ])?;
+        .set_preferred_hash_algorithms(preferred_hashes.clone())?
+        .set_preferred_symmetric_algorithms(preferred_symmetric_algorithms.clone())?;
     let direct_key_signature =
         builder.sign_direct_key(&mut key.clone().into_keypair()?, key.parts_as_public())?;
 
@@ -197,14 +412,8 @@ pub fn openpgp_cert_for_key(
         .set_key_flags(KeyFlags::empty().set_signing().set_certification())?
         .set_features(sequoia_openpgp::types::Features::sequoia())?
         .set_key_validity_period(validity)?
-        .set_preferred_hash_algorithms(vec![
-            sequoia_openpgp::types::HashAlgorithm::SHA512,
-            sequoia_openpgp::types::HashAlgorithm::SHA256,
-        ])?
-        .set_preferred_symmetric_algorithms(vec![
-            sequoia_openpgp::types::SymmetricAlgorithm::AES256,
-            sequoia_openpgp::types::SymmetricAlgorithm::AES128,
-        ])?;
+        .set_preferred_hash_algorithms(preferred_hashes)?
+        .set_preferred_symmetric_algorithms(preferred_symmetric_algorithms)?;
     let positive_cert_signature = user_id.bind(
         &mut key.clone().into_keypair()?,
         &sequoia_openpgp::Cert::try_from(key_packet.clone())?,
@@ -371,7 +580,7 @@ pub(crate) mod test_utils {
     use cryptoki::{
         context::{CInitializeArgs, CInitializeFlags, Pkcs11},
         mechanism::Mechanism,
-        object::Attribute,
+        object::{Attribute, MlDsaParameterSetType},
         session::UserType,
         types::AuthPin,
     };
@@ -479,11 +688,97 @@ pub(crate) mod test_utils {
                     ],
                 )?;
 
+                // Refer to https://www.rfc-editor.org/rfc/rfc8410.html#section-3
+                let ed25519_oid = asn1::oid!(1, 3, 101, 112);
+                let ed25519_oid_bytes = asn1::write_single(&ed25519_oid).unwrap();
+                session.generate_key_pair(
+                    &Mechanism::EccEdwardsKeyPairGen,
+                    &[
+                        Attribute::Id(vec![3]),
+                        Attribute::Label(b"ed25519-test-key".to_vec()),
+                        Attribute::Token(true),
+                        Attribute::Private(false),
+                        Attribute::EcParams(ed25519_oid_bytes),
+                        Attribute::Verify(true),
+                    ],
+                    &[
+                        Attribute::Id(vec![3]),
+                        Attribute::Label(b"ed25519-test-key".to_vec()),
+                        Attribute::Token(true),
+                        Attribute::Private(true),
+                        Attribute::Sensitive(true),
+                        Attribute::Sign(true),
+                    ],
+                )?;
+
+                // Refer to https://www.rfc-editor.org/rfc/rfc8410.html#section-3
+                let ed448_oid = asn1::oid!(1, 3, 101, 113);
+                let ed448_oid_bytes = asn1::write_single(&ed448_oid).unwrap();
+                session.generate_key_pair(
+                    &Mechanism::EccEdwardsKeyPairGen,
+                    &[
+                        Attribute::Id(vec![4]),
+                        Attribute::Label(b"ed448-test-key".to_vec()),
+                        Attribute::Token(true),
+                        Attribute::Private(false),
+                        Attribute::EcParams(ed448_oid_bytes),
+                        Attribute::Verify(true),
+                    ],
+                    &[
+                        Attribute::Id(vec![4]),
+                        Attribute::Label(b"ed448-test-key".to_vec()),
+                        Attribute::Token(true),
+                        Attribute::Private(true),
+                        Attribute::Sensitive(true),
+                        Attribute::Sign(true),
+                    ],
+                )?;
+
+                session.generate_key_pair(
+                    &Mechanism::MlDsaKeyPairGen,
+                    &[
+                        Attribute::Id(vec![5]),
+                        Attribute::Label(b"ml-dsa-65-test-key".to_vec()),
+                        Attribute::Token(true),
+                        Attribute::Private(false),
+                        Attribute::ParameterSet(MlDsaParameterSetType::ML_DSA_65.into()),
+                        Attribute::Verify(true),
+                    ],
+                    &[
+                        Attribute::Id(vec![5]),
+                        Attribute::Label(b"ml-dsa-65-test-key".to_vec()),
+                        Attribute::Token(true),
+                        Attribute::Private(true),
+                        Attribute::Sensitive(true),
+                        Attribute::Sign(true),
+                    ],
+                )?;
+
+                session.generate_key_pair(
+                    &Mechanism::MlDsaKeyPairGen,
+                    &[
+                        Attribute::Id(vec![6]),
+                        Attribute::Label(b"ml-dsa-87-test-key".to_vec()),
+                        Attribute::Token(true),
+                        Attribute::Private(false),
+                        Attribute::ParameterSet(MlDsaParameterSetType::ML_DSA_87.into()),
+                        Attribute::Verify(true),
+                    ],
+                    &[
+                        Attribute::Id(vec![6]),
+                        Attribute::Label(b"ml-dsa-87-test-key".to_vec()),
+                        Attribute::Token(true),
+                        Attribute::Private(true),
+                        Attribute::Sensitive(true),
+                        Attribute::Sign(true),
+                    ],
+                )?;
+
                 // Add unsupported key
                 session.generate_key_pair(
                     &Mechanism::RsaPkcsKeyPairGen,
                     &[
-                        Attribute::Id(vec![3]),
+                        Attribute::Id(vec![7]),
                         Attribute::Label(b"unsupported-rsa-key".to_vec()),
                         Attribute::Token(true),
                         Attribute::Private(false),
@@ -491,7 +786,7 @@ pub(crate) mod test_utils {
                         Attribute::ModulusBits(1024.into()),
                     ],
                     &[
-                        Attribute::Id(vec![3]),
+                        Attribute::Id(vec![7]),
                         Attribute::Label(b"unsupported-rsa-key".to_vec()),
                         Attribute::Token(true),
                         Attribute::Private(true),
@@ -596,7 +891,12 @@ pub(crate) mod test_utils {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use super::*;
+
+    use openssl::pkey::KeyType;
+    use sequoia_openpgp::types::PublicKeyAlgorithm;
 
     // Generated passwords should be base64 encoded and 128 bytes of randomness.
     #[test]
@@ -605,6 +905,310 @@ mod tests {
         let string = password.map(|p| String::from_utf8(p.to_vec()))?;
         let bytes = openssl::base64::decode_block(&string)?;
         assert_eq!(128, bytes.len());
+
+        Ok(())
+    }
+
+    #[test]
+    fn rsa_openpgp_certificate() -> anyhow::Result<()> {
+        let config = crate::server::Config::default();
+        let key_password = Password::from("test-key-password");
+        let openssl_key = PKey::from_rsa(Rsa::generate(4096)?)?;
+        let public_key = String::from_utf8(openssl_key.public_key_to_pem()?)?;
+        let encrypted_key = encrypt_key(key_password.clone(), openssl_key)?;
+        let key = db::Key {
+            id: 1,
+            hybrid_pair_id: None,
+            name: "test-rsa-key".to_string(),
+            key_algorithm: KeyAlgorithm::Rsa4K,
+            handle: "test-rsa-key".to_string(),
+            key_material: Some(binding::bind_with_pkcs11(&[], &encrypted_key)?),
+            public_key,
+            pkcs11_token_id: None,
+            pkcs11_key_id: None,
+        };
+        let user_id = packet::UserID::from("Test User <test@example.com>");
+
+        let certificate = openpgp_cert_for_key(
+            &config,
+            (&key, key_password.clone()),
+            None,
+            user_id.clone(),
+            Profile::RFC4880,
+            sequoia_openpgp::types::HashAlgorithm::SHA512,
+            0,
+        )?;
+        let cert = sequoia_openpgp::cert::Cert::from_str(&certificate)?;
+        assert!(!cert.is_tsk());
+        assert!(cert.primary_key().key().pk_algo() == PublicKeyAlgorithm::RSAEncryptSign);
+
+        Ok(())
+    }
+
+    #[test]
+    fn p256_openpgp_certificate() -> anyhow::Result<()> {
+        let config = crate::server::Config::default();
+        let key_password = Password::from("test-key-password");
+        let openssl_key = PKey::from_ec_key(EcKey::generate(
+            EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)?.as_ref(),
+        )?)?;
+        let public_key = String::from_utf8(openssl_key.public_key_to_pem()?)?;
+        let encrypted_key = encrypt_key(key_password.clone(), openssl_key)?;
+        let key = db::Key {
+            id: 1,
+            hybrid_pair_id: None,
+            name: "test-ec-key".to_string(),
+            key_algorithm: KeyAlgorithm::P256,
+            handle: "test-ec-key".to_string(),
+            key_material: Some(binding::bind_with_pkcs11(&[], &encrypted_key)?),
+            public_key,
+            pkcs11_token_id: None,
+            pkcs11_key_id: None,
+        };
+        let user_id = packet::UserID::from("Test User <test@example.com>");
+
+        let certificate = openpgp_cert_for_key(
+            &config,
+            (&key, key_password.clone()),
+            None,
+            user_id.clone(),
+            Profile::RFC4880,
+            sequoia_openpgp::types::HashAlgorithm::SHA512,
+            0,
+        )?;
+        let cert = sequoia_openpgp::cert::Cert::from_str(&certificate)?;
+        assert!(!cert.is_tsk());
+        assert!(cert.primary_key().key().pk_algo() == PublicKeyAlgorithm::ECDSA);
+
+        Ok(())
+    }
+
+    #[test]
+    fn ed25519_openpgp_certificate() -> anyhow::Result<()> {
+        let config = crate::server::Config::default();
+        let key_password = Password::from("test-key-password");
+        let openssl_key = PKey::generate_ed25519()?;
+        let public_key = String::from_utf8(openssl_key.public_key_to_pem()?)?;
+        let encrypted_key = encrypt_key(key_password.clone(), openssl_key)?;
+        let key = db::Key {
+            id: 1,
+            hybrid_pair_id: None,
+            name: "test-ed25519-key".to_string(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            handle: "test-handle".to_string(),
+            key_material: Some(binding::bind_with_pkcs11(&[], &encrypted_key)?),
+            public_key,
+            pkcs11_token_id: None,
+            pkcs11_key_id: None,
+        };
+        let user_id = packet::UserID::from("Test User <test@example.com>");
+
+        let certificate = openpgp_cert_for_key(
+            &config,
+            (&key, key_password.clone()),
+            None,
+            user_id.clone(),
+            Profile::RFC9580,
+            sequoia_openpgp::types::HashAlgorithm::SHA512,
+            0,
+        )?;
+        let cert = sequoia_openpgp::cert::Cert::from_str(&certificate)?;
+        assert!(!cert.is_tsk());
+        assert!(cert.primary_key().key().pk_algo() == PublicKeyAlgorithm::Ed25519);
+
+        Ok(())
+    }
+
+    #[test]
+    fn ed448_openpgp_certificate() -> anyhow::Result<()> {
+        let config = crate::server::Config::default();
+        let key_password = Password::from("test-key-password");
+        let openssl_key = PKey::generate_ed448()?;
+        let public_key = String::from_utf8(openssl_key.public_key_to_pem()?)?;
+        let encrypted_key = encrypt_key(key_password.clone(), openssl_key)?;
+        let key = db::Key {
+            id: 1,
+            hybrid_pair_id: None,
+            name: "test-ed448-key".to_string(),
+            key_algorithm: KeyAlgorithm::Ed448,
+            handle: "test-handle".to_string(),
+            key_material: Some(binding::bind_with_pkcs11(&[], &encrypted_key)?),
+            public_key,
+            pkcs11_token_id: None,
+            pkcs11_key_id: None,
+        };
+        let user_id = packet::UserID::from("Test User <test@example.com>");
+
+        let certificate = openpgp_cert_for_key(
+            &config,
+            (&key, key_password.clone()),
+            None,
+            user_id.clone(),
+            Profile::RFC9580,
+            sequoia_openpgp::types::HashAlgorithm::SHA512,
+            0,
+        )?;
+        let cert = sequoia_openpgp::cert::Cert::from_str(&certificate)?;
+        assert!(!cert.is_tsk());
+        assert!(cert.primary_key().key().pk_algo() == PublicKeyAlgorithm::Ed448);
+
+        Ok(())
+    }
+
+    #[test]
+    fn mldsa65_ed25519_openpgp_certificate() -> anyhow::Result<()> {
+        let config = crate::server::Config::default();
+        let key_password = Password::from("test-key-password");
+
+        let openssl_key = PKey::generate_ed25519()?;
+        let public_key = String::from_utf8(openssl_key.public_key_to_pem()?)?;
+        let encrypted_key = encrypt_key(key_password.clone(), openssl_key)?;
+        let key = db::Key {
+            id: 1,
+            hybrid_pair_id: None,
+            name: "test-ed25519-key".to_string(),
+            key_algorithm: KeyAlgorithm::Ed25519,
+            handle: "test-handle".to_string(),
+            key_material: Some(binding::bind_with_pkcs11(&[], &encrypted_key)?),
+            public_key,
+            pkcs11_token_id: None,
+            pkcs11_key_id: None,
+        };
+
+        let mut seed = [0; 32];
+        openssl::rand::rand_priv_bytes(seed.as_mut_slice())?;
+        let mldsa_key = PKey::private_key_from_seed(None, KeyType::ML_DSA_65, None, &seed)?;
+        let public_key = String::from_utf8(mldsa_key.public_key_to_pem()?)?;
+        let encrypted_key = encrypt_key(key_password.clone(), mldsa_key)?;
+        let pqc_key = db::Key {
+            id: 2,
+            hybrid_pair_id: Some(1),
+            name: "test-mldsa-65-key".to_string(),
+            key_algorithm: KeyAlgorithm::Mldsa65,
+            handle: "test-handle".to_string(),
+            key_material: Some(binding::bind_with_pkcs11(&[], &encrypted_key)?),
+            public_key,
+            pkcs11_token_id: None,
+            pkcs11_key_id: None,
+        };
+
+        let user_id = packet::UserID::from("Test User <test@example.com>");
+
+        let certificate = openpgp_cert_for_key(
+            &config,
+            (&key, key_password.clone()),
+            Some((&pqc_key, key_password.clone())),
+            user_id.clone(),
+            Profile::RFC9580,
+            sequoia_openpgp::types::HashAlgorithm::SHA512,
+            0,
+        )?;
+        let cert = sequoia_openpgp::cert::Cert::from_str(&certificate)?;
+        assert!(!cert.is_tsk());
+        assert!(cert.primary_key().key().pk_algo() == PublicKeyAlgorithm::MLDSA65_Ed25519);
+
+        Ok(())
+    }
+
+    #[test]
+    fn mldsa87_ed448_openpgp_certificate() -> anyhow::Result<()> {
+        let config = crate::server::Config::default();
+        let key_password = Password::from("test-key-password");
+
+        let openssl_key = PKey::generate_ed448()?;
+        let public_key = String::from_utf8(openssl_key.public_key_to_pem()?)?;
+        let encrypted_key = encrypt_key(key_password.clone(), openssl_key)?;
+        let key = db::Key {
+            id: 1,
+            hybrid_pair_id: None,
+            name: "test-ed448-key".to_string(),
+            key_algorithm: KeyAlgorithm::Ed448,
+            handle: "test-handle".to_string(),
+            key_material: Some(binding::bind_with_pkcs11(&[], &encrypted_key)?),
+            public_key,
+            pkcs11_token_id: None,
+            pkcs11_key_id: None,
+        };
+
+        let mut seed = [0; 32];
+        openssl::rand::rand_priv_bytes(seed.as_mut_slice())?;
+        let mldsa_key = PKey::private_key_from_seed(None, KeyType::ML_DSA_87, None, &seed)?;
+        let public_key = String::from_utf8(mldsa_key.public_key_to_pem()?)?;
+        let encrypted_key = encrypt_key(key_password.clone(), mldsa_key)?;
+        let pqc_key = db::Key {
+            id: 2,
+            hybrid_pair_id: Some(1),
+            name: "test-mldsa-87-key".to_string(),
+            key_algorithm: KeyAlgorithm::Mldsa87,
+            handle: "test-handle".to_string(),
+            key_material: Some(binding::bind_with_pkcs11(&[], &encrypted_key)?),
+            public_key,
+            pkcs11_token_id: None,
+            pkcs11_key_id: None,
+        };
+
+        let user_id = packet::UserID::from("Test User <test@example.com>");
+
+        let certificate = openpgp_cert_for_key(
+            &config,
+            (&key, key_password.clone()),
+            Some((&pqc_key, key_password.clone())),
+            user_id.clone(),
+            Profile::RFC9580,
+            sequoia_openpgp::types::HashAlgorithm::SHA512,
+            0,
+        )?;
+        let cert = sequoia_openpgp::cert::Cert::from_str(&certificate)?;
+        assert!(!cert.is_tsk());
+        assert!(cert.primary_key().key().pk_algo() == PublicKeyAlgorithm::MLDSA87_Ed448);
+
+        Ok(())
+    }
+
+    #[test]
+    fn openssl_ed25519_to_openpgp_rfc4880_fails() -> anyhow::Result<()> {
+        let openssl_key = PKey::generate_ed25519()?;
+
+        let error = openssl_to_openpgp(openssl_key, None, Profile::RFC4880).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Ed25519 OpenPGP keys are only supported with RFC 9580 profile"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn openssl_ed25519_to_openpgp() -> anyhow::Result<()> {
+        let openssl_key = PKey::generate_ed25519()?;
+
+        let (_public_key, _private_key, algorithm) =
+            openssl_to_openpgp(openssl_key, None, Profile::RFC9580).unwrap();
+        assert!(algorithm == PublicKeyAlgorithm::Ed25519);
+
+        Ok(())
+    }
+
+    #[test]
+    fn openssl_ed448_to_openpgp_rfc4880_fails() -> anyhow::Result<()> {
+        let openssl_key = PKey::generate_ed448()?;
+
+        let error = openssl_to_openpgp(openssl_key, None, Profile::RFC4880).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Ed448 OpenPGP keys are only supported with RFC 9580 profile"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn openssl_ed448_to_openpgp() -> anyhow::Result<()> {
+        let openssl_key = PKey::generate_ed448()?;
+
+        let (_public_key, _private_key, algorithm) =
+            openssl_to_openpgp(openssl_key, None, Profile::RFC9580).unwrap();
+        assert!(algorithm == PublicKeyAlgorithm::Ed448);
 
         Ok(())
     }

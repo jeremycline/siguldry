@@ -9,10 +9,13 @@ use anyhow::Context;
 use cryptoki::types::AuthPin;
 use rustix::termios::Termios;
 use sequoia_openpgp::crypto::Password;
-use siguldry::server::{
-    Config, Pkcs11Binding,
-    crypto::{self, binding::decrypt_key_password},
-    db,
+use siguldry::{
+    protocol::KeyAlgorithm,
+    server::{
+        Config, Pkcs11Binding,
+        crypto::{self, binding::decrypt_key_password},
+        db,
+    },
 };
 use tracing::instrument;
 
@@ -191,6 +194,67 @@ pub async fn manage(command: ManagementCommands, mut config: Config) -> anyhow::
                 )
                 .await?;
             }
+            KeyCommands::AssociateHybrid {
+                first_key_name,
+                second_key_name,
+            } => {
+                let first_key = db::Key::get(&mut conn, &first_key_name)
+                    .await
+                    .with_context(|| format!("No key with the named '{first_key_name}' found"))?;
+                let second_key = db::Key::get(&mut conn, &first_key_name)
+                    .await
+                    .with_context(|| format!("No key with the named '{second_key_name}' found"))?;
+
+                match first_key.key_algorithm {
+                    siguldry::protocol::KeyAlgorithm::Ed25519 => {
+                        if second_key.key_algorithm != KeyAlgorithm::Mldsa65 {
+                            return Err(anyhow::anyhow!(
+                                "The first key (Ed25519) is only pairable with ML-DSA-65 keys, but the second key is {}",
+                                second_key.key_algorithm
+                            ));
+                        }
+                    }
+                    siguldry::protocol::KeyAlgorithm::Ed448 => {
+                        if second_key.key_algorithm != KeyAlgorithm::Mldsa87 {
+                            return Err(anyhow::anyhow!(
+                                "The first key (Ed448) is only pairable with ML-DSA-87 keys, but the second key is {}",
+                                second_key.key_algorithm
+                            ));
+                        }
+                    }
+                    siguldry::protocol::KeyAlgorithm::Mldsa65 => {
+                        if second_key.key_algorithm != KeyAlgorithm::Ed25519 {
+                            return Err(anyhow::anyhow!(
+                                "The first key (ML-DSA-65) is only pairable with Ed25519 keys, but the second key is {}",
+                                second_key.key_algorithm
+                            ));
+                        }
+                    }
+                    siguldry::protocol::KeyAlgorithm::Mldsa87 => {
+                        if second_key.key_algorithm != KeyAlgorithm::Ed448 {
+                            return Err(anyhow::anyhow!(
+                                "The first key (ML-DSA-87) is only pairable with Ed448 keys, but the second key is {}",
+                                second_key.key_algorithm
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(anyhow::anyhow!(
+                            "The key '{}' is of type {} which is not allowed in a hybrid pair",
+                            first_key.name,
+                            first_key.key_algorithm
+                        ));
+                    }
+                }
+
+                let result = first_key.associate_hybrid(&mut conn, &second_key).await?;
+                if result.rows_affected() != 1 {
+                    return Err(anyhow::anyhow!(
+                        "An unexpected number of database rows ({}) were affected by the update",
+                        result.rows_affected()
+                    ));
+                }
+            }
             KeyCommands::X509 {
                 user_name,
                 key_name,
@@ -283,6 +347,7 @@ pub async fn manage(command: ManagementCommands, mut config: Config) -> anyhow::
                 key_name,
                 cert_name,
                 password_file,
+                hybrid_password_file,
                 pkcs11_binding_pin,
                 validity_days,
                 profile,
@@ -297,6 +362,17 @@ pub async fn manage(command: ManagementCommands, mut config: Config) -> anyhow::
                 let key_access = db::KeyAccess::get(&mut conn, &key, &user)
                     .await
                     .context("User doesn't have access to the key")?;
+
+                let hybrid = if let Some(hybrid_key) = key.find_hybrid(&mut conn).await? {
+                    // Check for access to its key pair before trying to unlock anything
+                    let hybrid_key_access = db::KeyAccess::get(&mut conn, &hybrid_key, &user)
+                        .await
+                        .context("User doesn't have access to the key's hybrid pair")?;
+                    Some((hybrid_key, hybrid_key_access))
+                } else {
+                    None
+                };
+
                 set_binding_pin(&mut config, pkcs11_binding_pin)?;
                 let user_password = password_from_file_or_prompt(
                     "Enter the password to access the key: ",
@@ -309,10 +385,29 @@ pub async fn manage(command: ManagementCommands, mut config: Config) -> anyhow::
                     &key_access.encrypted_passphrase,
                 )
                 .await?;
+                let hybrid_with_password =
+                    if let Some((hybrid_key, hybrid_key_access)) = hybrid.as_ref() {
+                        let prompt = format!(
+                            "Enter the password to access the key's hybrid pair '{}': ",
+                            hybrid_key.name
+                        );
+                        let hybrid_user_password =
+                            password_from_file_or_prompt(&prompt, hybrid_password_file, 0)?;
+                        let hybrid_key_password = decrypt_key_password(
+                            &config.pkcs11_bindings,
+                            hybrid_user_password,
+                            &hybrid_key_access.encrypted_passphrase,
+                        )
+                        .await?;
+                        Some((hybrid_key, hybrid_key_password))
+                    } else {
+                        None
+                    };
+
                 let certificate = crypto::openpgp_cert_for_key(
                     &config,
-                    &key,
-                    key_password,
+                    (&key, key_password),
+                    hybrid_with_password,
                     user_id.clone().into(),
                     profile.into(),
                     sequoia_openpgp::types::HashAlgorithm::SHA512,
@@ -944,6 +1039,7 @@ mod tests {
                 key_name: "openpgp-key".to_string(),
                 cert_name: "openpgp-cert".to_string(),
                 password_file: Some(password_file),
+                hybrid_password_file: None,
                 pkcs11_binding_pin: None,
                 validity_days: 30,
                 profile: OpenPgpProfile::RFC4880,
