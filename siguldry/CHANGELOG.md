@@ -7,12 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+This release contains a modest set of breaking changes, all of which are server admin (particularly
+key creation) related. In short, to migrate:
+
+- Remove the `openpgp_user_id` key from the Siguldry server configuration file; this is
+  now a command-line argument provided during OpenPGP certificate creation.
+
+- For simplicity, all X.509 certificates created during key creation are self-signed.
+  Additional certificates signed by a Certificate Authority can be created with the
+  `key x509` sub-command.
+
+- Adjust any scripts using the `siguldry-server` CLI to create keys for the changed
+  flag names.
+
 ### Fixed
 
 - The bridge now checks that the server/client connection is not dead before bridging.
   This was commonly seen when restarting the server without restarting the bridge, which
   would result in the client failing the first few requests while the stale connections
   were slowly drained (#250)
+
+### Added
+
+- There is now a `siguldry-server manage key openpgp` command to create OpenPGP certificates for a
+  key pair.
+
+### Changed
+
+- **BREAKING CHANGE** the flag names on the `siguldry-server` CLI for X509 and OpenPGP certificates
+  is now the same across `siguldry-server manage key create`, `siguldry-server manage key x509`, and
+  `siguldry-server manage key openpgp`.
+
+- **BREAKING CHANGE** the `siguldry-server manage key create` command no longer unconditionally
+  creates X509 and OpenPGP certificates for all keys. If the appropriate `--x509-*` and `--openpgp-*`
+  flags are and the key algorithm is supported, a certificate will be created. Additionally,
+  certificates can be done separately with the `siguldry-server manage key x509` and
+  `siguldry-server manage key openpgp` commands.  This change is due to not all key algorithms being
+  supported by OpenPGP and a desire for a consistent experience.
+
+- **BREAKING CHANGE** The `openpgp_user_id` server configuration option is no longer valid.
+  User IDs are now provided when creating the OpenPGP certificate, making it easier to
+  use different user IDs for each key.
+
+- **BREAKING CHANGE** It's no longer possible to create CA-signed X.509 certificates during key
+  creation.  This can still be done using the `siguldry-server manage key x509` command after key
+  creation.
 
 
 ## [0.8.0] - 2026-07-09

@@ -142,6 +142,7 @@ pub mod keys {
     pub const PGP_EC_KEY_PASSWORD: &str = "🐉🐉🐉🐉🐉";
     pub const PGP_EC_KEY_EMAIL: &str = "Test Signing <sign@example.com>";
 
+    pub const CA_CERT_NAME: &str = "test-ca-cert";
     pub const CA_KEY_NAME: &str = "test-ca-key";
     pub const CA_KEY_PASSWORD: &str = "🦀🦀🦀🦀";
 
@@ -486,8 +487,10 @@ impl InstanceBuilder {
                         "manage",
                         "key",
                         "create",
-                        "--openpgp-profile",
-                        profile,
+                        "--x509-cert-name=x509-cert",
+                        "--openpgp-cert-name=openpgp-cert",
+                        format!("--openpgp-profile={profile}").as_str(),
+                        format!("--openpgp-user-id={}", keys::PGP_KEY_EMAIL).as_str(),
                         "siguldry-client",
                         keys::PGP_KEY_NAME,
                     ],
@@ -504,8 +507,6 @@ impl InstanceBuilder {
                         "manage",
                         "key",
                         "create",
-                        "--openpgp-profile",
-                        profile,
                         "--algorithm",
                         "p256",
                         "siguldry-client",
@@ -513,11 +514,44 @@ impl InstanceBuilder {
                     ],
                     Some(&format!("{}\n", keys::PGP_EC_KEY_PASSWORD)),
                 )?;
+                let stdin = if self.with_pkcs11_binding {
+                    format!("{}\n{}\n", keys::HSM_PIN, keys::PGP_EC_KEY_PASSWORD)
+                } else {
+                    format!("{}\n", keys::PGP_EC_KEY_PASSWORD)
+                };
+                Self::run_server_command(
+                    &server_bin,
+                    &server_config_file,
+                    &[
+                        "manage",
+                        "key",
+                        "x509",
+                        "--user-name=siguldry-client",
+                        format!("--key-name={}", keys::PGP_EC_KEY_NAME).as_str(),
+                        "--x509-cert-name=x509-cert",
+                    ],
+                    Some(&stdin),
+                )?;
+                Self::run_server_command(
+                    &server_bin,
+                    &server_config_file,
+                    &[
+                        "manage",
+                        "key",
+                        "openpgp",
+                        "--user-name=siguldry-client",
+                        format!("--key-name={}", keys::PGP_EC_KEY_NAME).as_str(),
+                        "--openpgp-cert-name=openpgp-cert",
+                        format!("--openpgp-profile={profile}").as_str(),
+                        format!("--openpgp-user-id={}", keys::PGP_EC_KEY_EMAIL).as_str(),
+                    ],
+                    Some(&stdin),
+                )?;
                 maybe_auto_unlock.push((keys::PGP_EC_KEY_NAME, keys::PGP_EC_KEY_PASSWORD));
             }
 
             if self.with_ca_key {
-                Self::create_ca_key(&server_bin, &server_config_file)?;
+                self.create_ca_key(&server_bin, &server_config_file)?;
                 maybe_auto_unlock.push((keys::CA_KEY_NAME, keys::CA_KEY_PASSWORD));
             }
 
@@ -924,7 +958,7 @@ impl InstanceBuilder {
         Ok(())
     }
 
-    fn create_ca_key(server_bin: &Path, server_config_file: &Path) -> anyhow::Result<()> {
+    fn create_ca_key(&self, server_bin: &Path, server_config_file: &Path) -> anyhow::Result<()> {
         Self::run_server_command(
             server_bin,
             server_config_file,
@@ -932,11 +966,29 @@ impl InstanceBuilder {
                 "manage",
                 "key",
                 "create",
-                "--x509-usage=certificate-authority",
                 "siguldry-client",
                 keys::CA_KEY_NAME,
             ],
             Some(&format!("{}\n", keys::CA_KEY_PASSWORD)),
+        )?;
+        let stdin = if self.with_pkcs11_binding {
+            format!("{}\n{}\n", keys::HSM_PIN, keys::CA_KEY_PASSWORD)
+        } else {
+            format!("{}\n", keys::CA_KEY_PASSWORD)
+        };
+        Self::run_server_command(
+            server_bin,
+            server_config_file,
+            &[
+                "manage",
+                "key",
+                "x509",
+                "--user-name=siguldry-client",
+                format!("--key-name={}", keys::CA_KEY_NAME).as_str(),
+                format!("--x509-cert-name={}", keys::CA_CERT_NAME).as_str(),
+                "--x509-usage=certificate-authority",
+            ],
+            Some(&stdin),
         )
     }
 
@@ -945,20 +997,6 @@ impl InstanceBuilder {
         server_bin: &Path,
         server_config_file: &Path,
     ) -> anyhow::Result<()> {
-        let stdin = if self.with_pkcs11_binding {
-            format!(
-                "{}\n{}\n{}\n",
-                keys::HSM_PIN,
-                keys::CA_KEY_PASSWORD,
-                keys::CODESIGNING_KEY_PASSWORD,
-            )
-        } else {
-            format!(
-                "{}\n{}\n",
-                keys::CA_KEY_PASSWORD,
-                keys::CODESIGNING_KEY_PASSWORD,
-            )
-        };
         Self::run_server_command(
             server_bin,
             server_config_file,
@@ -966,26 +1004,35 @@ impl InstanceBuilder {
                 "manage",
                 "key",
                 "create",
-                "--x509-usage=code-signing",
-                format!("--x509-ca-key-name={}", keys::CA_KEY_NAME).as_str(),
                 "siguldry-client",
                 keys::CODESIGNING_KEY_NAME,
+            ],
+            Some(&format!("{}\n", keys::CODESIGNING_KEY_PASSWORD)),
+        )?;
+        let stdin = if self.with_pkcs11_binding {
+            format!("{}\n{}\n", keys::HSM_PIN, keys::CA_KEY_PASSWORD)
+        } else {
+            format!("{}\n", keys::CA_KEY_PASSWORD)
+        };
+        Self::run_server_command(
+            server_bin,
+            server_config_file,
+            &[
+                "manage",
+                "key",
+                "x509",
+                "--user-name=siguldry-client",
+                format!("--key-name={}", keys::CODESIGNING_KEY_NAME).as_str(),
+                "--x509-cert-name=test-codesigning-cert",
+                format!("--ca-key-name={}", keys::CA_KEY_NAME).as_str(),
+                format!("--ca-cert-name={}", keys::CA_CERT_NAME).as_str(),
+                "--x509-usage=code-signing",
             ],
             Some(&stdin),
         )
     }
 
     fn create_ec_key(&self, server_bin: &Path, server_config_file: &Path) -> anyhow::Result<()> {
-        let stdin = if self.with_pkcs11_binding {
-            format!(
-                "{}\n{}\n{}\n",
-                keys::HSM_PIN,
-                keys::CA_KEY_PASSWORD,
-                keys::EC_KEY_PASSWORD,
-            )
-        } else {
-            format!("{}\n{}\n", keys::CA_KEY_PASSWORD, keys::EC_KEY_PASSWORD,)
-        };
         Self::run_server_command(
             server_bin,
             server_config_file,
@@ -994,10 +1041,29 @@ impl InstanceBuilder {
                 "key",
                 "create",
                 "--algorithm=p256",
-                "--x509-usage=code-signing",
-                format!("--x509-ca-key-name={}", keys::CA_KEY_NAME).as_str(),
                 "siguldry-client",
                 keys::EC_KEY_NAME,
+            ],
+            Some(&format!("{}\n", keys::EC_KEY_PASSWORD)),
+        )?;
+        let stdin = if self.with_pkcs11_binding {
+            format!("{}\n{}\n", keys::HSM_PIN, keys::CA_KEY_PASSWORD)
+        } else {
+            format!("{}\n", keys::CA_KEY_PASSWORD)
+        };
+        Self::run_server_command(
+            server_bin,
+            server_config_file,
+            &[
+                "manage",
+                "key",
+                "x509",
+                "--user-name=siguldry-client",
+                format!("--key-name={}", keys::EC_KEY_NAME).as_str(),
+                "--x509-cert-name=test-ec-cert",
+                format!("--ca-key-name={}", keys::CA_KEY_NAME).as_str(),
+                format!("--ca-cert-name={}", keys::CA_CERT_NAME).as_str(),
+                "--x509-usage=code-signing",
             ],
             Some(&stdin),
         )

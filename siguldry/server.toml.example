@@ -23,11 +23,6 @@ connection_pool_size = 32
 # UTF-8 character "🪿" counts as 4 bytes.
 user_password_length = 32
 
-# The user ID to use when creating OpenPGP keys.
-#
-# This is typically an email like "Signing Key <signing@example.com>".
-openpgp_user_id = "Test Signing <sign@example.com>"
-
 # The set of certificates to encrypt passwords with.
 #
 # At least one entry should include a PKCS#11 URI for a private key. Signing keys are encrypted

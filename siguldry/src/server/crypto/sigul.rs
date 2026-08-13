@@ -178,8 +178,8 @@ pub fn convert_gpg_key(
 
     let private_key = pgp_key_to_openssl(&cert, &key_password)?;
     let x509_cert = super::x509_certificate_for_key_private(
-        PKey::public_key_from_der(&private_key.public_key_to_der()?)?,
-        private_key.clone(),
+        &PKey::public_key_from_der(&private_key.public_key_to_der()?)?,
+        &private_key,
         None,
         &config.certificate_subject,
         KeyUsage::CodeSigning,

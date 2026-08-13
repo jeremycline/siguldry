@@ -115,7 +115,7 @@ Users can also have their access to signing keys granted or revoked with the `gr
 
 Keys can be managed with `siguldry-server manage key` subcommands.
 
-For example, to create a key:
+For example, to create a new key pair:
 
 ```bash
 systemd-run --pty --wait --collect \
@@ -130,10 +130,34 @@ You will be prompted to provide the user's access password. This password is use
 key, so it should be a long, random value that you store safely in a credential manager.
 
 Review the help text for `key create` as there are a number of optional values to control the key
-type.
+type and associated public certificates.
 
 > [!NOTE]
-> Keys are created with both X.509 certificates and OpenPGP certificates
+> A key pair alone is typically not enough for signing, and you should create an X.509 and possibly an
+> OpenPGP certificate for the key. This can be done at creation, as well as later with the
+> `siguldry-server manage key x509`and `siguldry-server manage key openpgp` commands. Keys can have
+> multiple of both types of certificates.
+
+
+```bash
+systemd-run --pty --wait --collect \
+  --working-directory=/var/lib/siguldry \
+  --setenv=SIGULDRY_SERVER_CONFIG=/etc/siguldry/server.toml \
+  --uid=siguldry \
+  --gid=siguldry \
+  siguldry-server manage key x509 --user-name jcline --key-name test-key --x509-cert-name test-x509-cert
+
+systemd-run --pty --wait --collect \
+  --working-directory=/var/lib/siguldry \
+  --setenv=SIGULDRY_SERVER_CONFIG=/etc/siguldry/server.toml \
+  --uid=siguldry \
+  --gid=siguldry \
+  siguldry-server manage key openpgp --user-name jcline --key-name test-key --openpgp-cert-name test-openpgp-cert --openpgp-user-id "Test Signing <signing@example.com>"
+```
+
+> [!CAUTION]
+> If you plan to sign with GPG via gnupg-pkcs11-scd, you must create an X.509 certificate in
+> addition to the OpenPGP certificate for the key to be discovered by gnupg-pkcs11-scd.
 
 ### Services
 

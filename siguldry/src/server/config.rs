@@ -82,10 +82,12 @@ pub struct Config {
     /// The rest of the certificate's subject is specified here.
     pub certificate_subject: X509SubjectName,
 
-    /// The user ID to use when creating OpenPGP keys.
+    /// This setting has moved to the CLI as a per-key argument.
     ///
-    /// This is typically an email like "Signing Key <signing@example.com>".
-    pub openpgp_user_id: String,
+    /// This continues to exist to allow old server configurations to start with this setting,
+    /// but will result in a deprecation warning logged.
+    #[serde(default, deserialize_with = "deserialize_deprecated_openpgp_user_id")]
+    pub openpgp_user_id: Option<String>,
 
     /// The set of certificates to encrypt passwords with.
     ///
@@ -192,7 +194,7 @@ impl Default for Config {
             },
             pkcs11_bindings: vec![],
             certificate_subject: Default::default(),
-            openpgp_user_id: "Test Signing <sign@example.com>".to_string(),
+            openpgp_user_id: None,
         }
     }
 }
@@ -213,6 +215,20 @@ fn default_socket_path() -> PathBuf {
 
 fn default_state_directory() -> PathBuf {
     PathBuf::from("/var/lib/siguldry/")
+}
+
+fn deserialize_deprecated_openpgp_user_id<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let openpgp_user_id = String::deserialize(deserializer)?;
+    tracing::error!(
+        "The server configuration key \"openpgp_user_id\" is deprecated and will be removed in \
+         a future release - remove it to avoid an error when upgrading."
+    );
+    Ok(Some(openpgp_user_id))
 }
 
 #[cfg(test)]
@@ -279,7 +295,6 @@ bridge_hostname = "bridge.example.com"
 bridge_port = 44333
 connection_pool_size = 16
 user_password_length = 64
-openpgp_user_id = "Fedora <fedora-openpgp@fedoraproject.org>"
 another_key = 42
 
 pkcs11_bindings = []
@@ -301,6 +316,81 @@ organizational_unit = "Primary Cat Scratcher"
             assert!(error.message().contains("unknown field `another_key`"));
         } else {
             panic!("Config should fail to load");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn deprecation_warning_openpgp_id() -> anyhow::Result<()> {
+        let config = r#"
+state_directory = "/var/lib/siguldry/"
+bridge_hostname = "bridge.example.com"
+bridge_port = 44333
+connection_pool_size = 16
+user_password_length = 64
+openpgp_user_id = "Non-default <deprecated@example.com>"
+
+pkcs11_bindings = []
+
+[credentials]
+private_key = "siguldry.server.private_key.pem"
+certificate = "/etc/siguldry/server.cert"
+ca_certificate = "/etc/siguldry/ca.crt"
+
+[certificate_subject]
+country = "US"
+state_or_province = "Maryland"
+locality = "Bethesda"
+organization = "Cat Caretaker"
+organizational_unit = "Primary Cat Scratcher"
+        "#;
+
+        if let Ok(_config) = toml::from_str::<super::Config>(config) {
+            assert!(logs_contain(
+                "The server configuration key \"openpgp_user_id\" is deprecated and will be \
+                removed in a future release - remove it to avoid an error when upgrading."
+            ));
+        } else {
+            panic!("Config should load");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn no_deprecation_warning_with_default_openpgp_id() -> anyhow::Result<()> {
+        let config = r#"
+state_directory = "/var/lib/siguldry/"
+bridge_hostname = "bridge.example.com"
+bridge_port = 44333
+connection_pool_size = 16
+user_password_length = 64
+
+pkcs11_bindings = []
+
+[credentials]
+private_key = "siguldry.server.private_key.pem"
+certificate = "/etc/siguldry/server.cert"
+ca_certificate = "/etc/siguldry/ca.crt"
+
+[certificate_subject]
+country = "US"
+state_or_province = "Maryland"
+locality = "Bethesda"
+organization = "Cat Caretaker"
+organizational_unit = "Primary Cat Scratcher"
+        "#;
+
+        if let Ok(_config) = toml::from_str::<super::Config>(config) {
+            assert!(!logs_contain(
+                "The server configuration key \"openpgp_user_id\" is deprecated and will be \
+                removed in a future release - remove it to avoid an error when upgrading."
+            ));
+        } else {
+            panic!("Config should load");
         }
 
         Ok(())
