@@ -128,7 +128,6 @@ pub fn sign_with_pkcs11(
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
     use std::path::PathBuf;
     use std::process::Command;
 
@@ -318,11 +317,6 @@ mod tests {
             &crate::server::Config::default(),
             user_password.clone(),
             key_algorithm,
-            sequoia_openpgp::Profile::RFC4880,
-            crypto::KeyUsage::CodeSigning,
-            "test-key".to_string(),
-            NonZeroU32::new(100).unwrap(),
-            None,
         )?;
         let key = db::Key {
             id: 1,
@@ -397,11 +391,6 @@ mod tests {
             &crate::server::Config::default(),
             user_password.clone(),
             key_algorithm,
-            sequoia_openpgp::Profile::RFC4880,
-            crypto::KeyUsage::CodeSigning,
-            "test-key".to_string(),
-            NonZeroU32::new(100).unwrap(),
-            None,
         )?;
         let key = db::Key {
             id: 1,

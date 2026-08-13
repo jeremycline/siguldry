@@ -56,6 +56,10 @@ $ PKCS11_PROVIDER_MODULE=path/to/libsiguldry_pkcs11.so openssl \
 It's possible to use gpg2 with the module via
 [gnupg-pkcs11-scd](https://github.com/alonbl/gnupg-pkcs11-scd).
 
+> [!NOTE]
+> To use a key via gnupg-pkcs11-scd, the Siguldry key must have both an X509 and OpenPGP
+> certificate associated with it.
+
 After installing `gnupg-pkcs11-scd`, add some configuration:
 ```bash
 # Configure gpg-agent to use gnupg-pkcs11-scd

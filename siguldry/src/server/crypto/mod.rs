@@ -6,7 +6,7 @@
 //! Sequoia is used for OpenPGP signatures and for the symmetric encryption of keys managed by Siguldry.
 //! OpenSSL is used for other signatures.
 
-use std::num::NonZeroU32;
+use std::{num::NonZeroU32, time::Duration};
 
 use openssl::{
     bn::{BigNum, BigNumContext},
@@ -57,21 +57,13 @@ pub struct EncryptedKey {
     pub encrypted_password: Vec<u8>,
     pub key_material: String,
     pub public_key_pem: String,
-    pub openpgp_certificate: String,
-    pub x509_certificate: String,
 }
 
-/// Generate a "soft" key pair, OpenPGP certificate, and X509 certificate.
-#[allow(clippy::too_many_arguments)]
+/// Generate an encrypted "soft" key pair.
 pub fn create_encrypted_key(
     config: &crate::server::Config,
     user_password: Password,
     algorithm: KeyAlgorithm,
-    openpgp_profile: Profile,
-    key_usage: KeyUsage,
-    x509_common_name: String,
-    x509_validity: NonZeroU32,
-    x509_ca: Option<(db::Key, Password, db::PublicKeyMaterial)>,
 ) -> anyhow::Result<EncryptedKey> {
     let key_password = generate_password()?;
     let key = match algorithm {
@@ -81,47 +73,6 @@ pub fn create_encrypted_key(
             EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)?.as_ref(),
         )?)?,
     };
-    let (signing_key, issuer) = if let Some((ca_key, key_password, issuer)) = x509_ca {
-        let key_material = if let Some(material) = &ca_key.key_material {
-            material
-        } else {
-            return Err(anyhow::anyhow!(
-                "CA keys in a PKCS#11 token aren't yet supported"
-            ));
-        };
-        let ca_pem = binding::unbind_with_pkcs11(&config.pkcs11_bindings, key_material)?;
-        let signing_key = key_password.map(|passphrase| {
-            PKey::private_key_from_pem_passphrase(ca_pem.as_bytes(), passphrase)
-        })?;
-        let issuer = x509::X509::from_pem(issuer.data.as_bytes())?;
-        (signing_key, Some(issuer))
-    } else {
-        (key.clone(), None)
-    };
-    // This seems silly but I can't find a better interface to get the public key variant.
-    let pubkey = PKey::public_key_from_der(&key.public_key_to_der()?)?;
-    let x509_certificate = x509_certificate_for_key_private(
-        pubkey,
-        signing_key,
-        issuer,
-        &config.certificate_subject,
-        key_usage,
-        &x509_common_name,
-        x509_validity,
-    )?;
-
-    let openpgp_cert = openpgp_cert_for_key(
-        &key,
-        config.openpgp_user_id.clone().into(),
-        openpgp_profile,
-        sequoia_openpgp::types::HashAlgorithm::SHA512,
-    )?;
-    let openpgp_certificate = String::from_utf8(
-        openpgp_cert
-            .strip_secret_key_material()
-            .armored()
-            .to_vec()?,
-    )?;
     let public_key_pem = String::from_utf8(key.public_key_to_pem()?)?;
     let handle = hex::encode_upper(openssl::hash::hash(
         openssl::hash::MessageDigest::sha256(),
@@ -137,20 +88,29 @@ pub fn create_encrypted_key(
         encrypted_password,
         key_material,
         public_key_pem,
-        openpgp_certificate,
-        x509_certificate,
     })
 }
 
-/// Build an OpenPGP certificate for an OpenSSL key.
-///
-/// Note that this will need adjustments to handle hybrid keys.
-fn openpgp_cert_for_key(
-    openssl_key: &PKey<Private>,
+/// Generate an OpenPGP certificate for the provided key.
+pub fn openpgp_cert_for_key(
+    config: &crate::server::Config,
+    key: &db::Key,
+    key_password: Password,
     user_id: packet::UserID,
     profile: Profile,
     hash_algorithm: sequoia_openpgp::types::HashAlgorithm,
-) -> anyhow::Result<sequoia_openpgp::Cert> {
+    validity_days: u32,
+) -> anyhow::Result<String> {
+    let key_material = key
+        .key_material
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("PKCS#11-backed OpenPGP keys aren't yet supported"))?;
+    let key_pem = binding::unbind_with_pkcs11(&config.pkcs11_bindings, key_material)?;
+    let openssl_key = key_password
+        .map(|passphrase| PKey::private_key_from_pem_passphrase(key_pem.as_bytes(), passphrase))?;
+    let validity =
+        (validity_days > 0).then(|| Duration::from_secs(u64::from(validity_days) * 24 * 60 * 60));
+
     let (public, secret, alorithm) = if let Ok(rsa) = openssl_key.rsa() {
         let p = rsa
             .p()
@@ -219,6 +179,7 @@ fn openpgp_cert_for_key(
         .set_signature_creation_time(creation_time)?
         .set_key_flags(KeyFlags::empty().set_signing().set_certification())?
         .set_features(sequoia_openpgp::types::Features::sequoia())?
+        .set_key_validity_period(validity)?
         .set_preferred_hash_algorithms(vec![
             sequoia_openpgp::types::HashAlgorithm::SHA512,
             sequoia_openpgp::types::HashAlgorithm::SHA256,
@@ -235,6 +196,7 @@ fn openpgp_cert_for_key(
         .set_signature_creation_time(creation_time)?
         .set_key_flags(KeyFlags::empty().set_signing().set_certification())?
         .set_features(sequoia_openpgp::types::Features::sequoia())?
+        .set_key_validity_period(validity)?
         .set_preferred_hash_algorithms(vec![
             sequoia_openpgp::types::HashAlgorithm::SHA512,
             sequoia_openpgp::types::HashAlgorithm::SHA256,
@@ -258,7 +220,7 @@ fn openpgp_cert_for_key(
     .strip_secret_key_material();
     assert!(!cert.is_tsk());
 
-    Ok(cert)
+    Ok(String::from_utf8(cert.armored().to_vec()?)?)
 }
 
 /// The intended purpose for an X509 certificate.
