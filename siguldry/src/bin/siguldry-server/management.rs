@@ -95,6 +95,48 @@ fn password_from_file_or_prompt(
     Ok(user_password)
 }
 
+/// Set the binding pin for the available private key.
+///
+/// If no bindings are configured, this is a no-op.
+fn set_binding_pin(config: &mut Config, pin_file: Option<PathBuf>) -> anyhow::Result<()> {
+    let binding_count = config
+        .pkcs11_bindings
+        .iter()
+        .filter(|binding| binding.private_key.is_some())
+        .count();
+
+    if pin_file.is_some() && binding_count > 1 {
+        // We could try the pin for all configured private keys, but that's dangerous since tokens usually lock up after
+        // a certain number of incorrect guesses.
+        return Err(anyhow::anyhow!(
+            "You can't provide a PIN via file with more than one binding private key configured"
+        ));
+    }
+
+    for binding in config
+        .pkcs11_bindings
+        .iter_mut()
+        .filter(|binding| binding.private_key.is_some())
+    {
+        let prompt = format!(
+            "Please enter the user PIN for {}:",
+            binding
+                .private_key
+                .as_ref()
+                .expect("filter for bindings with private key URIs")
+        );
+        let binding_pin = password_from_file_or_prompt(&prompt, pin_file.clone(), 0)?;
+
+        if binding_pin.map(|p| !p.is_empty()) {
+            binding.pin = Some(binding_pin);
+        } else {
+            eprintln!("Skipping key as empty password was provided");
+        }
+    }
+
+    Ok(())
+}
+
 #[instrument(skip_all)]
 pub async fn manage(command: ManagementCommands, mut config: Config) -> anyhow::Result<()> {
     let db_pool = db::pool(
@@ -115,72 +157,8 @@ pub async fn manage(command: ManagementCommands, mut config: Config) -> anyhow::
                 password_file,
                 admin,
                 name,
-                openpgp_profile,
-                x509_validity_days,
-                x509_common_name,
-                x509_ca_key_name,
-                x509_ca_cert_name,
-                x509_ca_password_file,
-                x509_usage,
             } => {
-                let x509_validity_days = std::num::NonZeroU32::new(x509_validity_days)
-                    .ok_or_else(|| anyhow::anyhow!("X509 validity must be non-zero"))?;
                 let user = db::User::get(&mut conn, &admin).await?;
-                let x509_ca = if let Some(x509_ca) = x509_ca_key_name {
-                    // todo user should also provide the cert name
-                    let ca_key = db::Key::get(&mut conn, &x509_ca)
-                        .await
-                        .context("No key found for specified certificate authority")?;
-                    let key_access = db::KeyAccess::get(&mut conn, &ca_key, &user)
-                        .await
-                        .context("User doesn't have access to the signing key")?;
-                    let mut certs = db::PublicKeyMaterial::list(
-                        &mut conn,
-                        &ca_key,
-                        db::PublicKeyMaterialType::X509,
-                    )
-                    .await?;
-
-                    let cert = if let Some(ca_cert_name) = x509_ca_cert_name {
-                        certs.into_iter().find(|c| c.name == ca_cert_name).ok_or_else(|| {
-                            anyhow::anyhow!("No x509 certificate found for CA {x509_ca} with name {ca_cert_name}")
-                        })?
-                    } else {
-                        certs.pop().ok_or_else(|| {
-                            anyhow::anyhow!("No x509 certificate found for CA {x509_ca}")
-                        })?
-                    };
-
-                    for binding in config
-                        .pkcs11_bindings
-                        .iter_mut()
-                        .filter(|b| b.private_key.is_some())
-                    {
-                        let prompt = PromptPassword::new(format!(
-                            "Please enter the user PIN for {}:",
-                            binding
-                                .private_key
-                                .as_ref()
-                                .expect("filter for bindings with private key URIs")
-                        ))?;
-                        let pin = prompt.prompt()?;
-                        binding.pin = Some(pin);
-                    }
-                    let prompt = format!("Enter the password to access the CA key {x509_ca}: ",);
-                    let user_password =
-                        password_from_file_or_prompt(&prompt, x509_ca_password_file, 0)?;
-                    let key_password = decrypt_key_password(
-                        &config.pkcs11_bindings,
-                        user_password,
-                        &key_access.encrypted_passphrase,
-                    )
-                    .await?;
-
-                    Some((ca_key, key_password, cert))
-                } else {
-                    None
-                };
-
                 let prompt = format!(
                     "Enter a password to access the key (at least {} bytes): ",
                     config.user_password_length.get()
@@ -191,16 +169,8 @@ pub async fn manage(command: ManagementCommands, mut config: Config) -> anyhow::
                     config.user_password_length.get() as usize,
                 )?;
 
-                let encrypted_key = crypto::create_encrypted_key(
-                    &config,
-                    user_password,
-                    algorithm,
-                    openpgp_profile.into(),
-                    x509_usage,
-                    x509_common_name.unwrap_or_else(|| name.clone()),
-                    x509_validity_days,
-                    x509_ca,
-                )?;
+                let encrypted_key =
+                    crypto::create_encrypted_key(&config, user_password, algorithm)?;
                 let key = db::Key::create(
                     &mut conn,
                     &name,
@@ -220,31 +190,18 @@ pub async fn manage(command: ManagementCommands, mut config: Config) -> anyhow::
                     true,
                 )
                 .await?;
-                db::PublicKeyMaterial::create(
-                    &mut conn,
-                    &key,
-                    format!("{}-x509", name),
-                    db::PublicKeyMaterialType::X509,
-                    encrypted_key.x509_certificate,
-                )
-                .await?;
-                db::PublicKeyMaterial::create(
-                    &mut conn,
-                    &key,
-                    format!("{}-openpgp", name),
-                    db::PublicKeyMaterialType::OpenPgpCert,
-                    encrypted_key.openpgp_certificate,
-                )
-                .await?;
             }
             KeyCommands::X509 {
                 user_name,
                 key_name,
+                cert_name,
                 usage,
                 common_name,
                 validity_days,
-                certificate_authority,
+                ca_key_name,
+                ca_cert_name,
                 ca_password_file,
+                pkcs11_binding_pin,
             } => {
                 let key = db::Key::get(&mut conn, &key_name)
                     .await
@@ -252,7 +209,7 @@ pub async fn manage(command: ManagementCommands, mut config: Config) -> anyhow::
                 let user = db::User::get(&mut conn, &user_name)
                     .await
                     .context("The user doesn't exist")?;
-                let (key_access, certificate_authority) = if let Some(ca) = certificate_authority {
+                let (key_access, certificate_authority) = if let Some(ca) = ca_key_name {
                     let ca_key = db::Key::get(&mut conn, &ca)
                         .await
                         .context("No key found for specified certificate authority")?;
@@ -265,9 +222,20 @@ pub async fn manage(command: ManagementCommands, mut config: Config) -> anyhow::
                         db::PublicKeyMaterialType::X509,
                     )
                     .await?;
-                    let cert = certs
-                        .pop()
-                        .ok_or_else(|| anyhow::anyhow!("No x509 certificate found for CA {ca}"))?;
+                    let cert = if let Some(ca_cert_name) = ca_cert_name {
+                        certs
+                            .into_iter()
+                            .find(|cert| cert.name == ca_cert_name)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "No x509 certificate found for CA {ca} with name {ca_cert_name}"
+                                )
+                            })?
+                    } else {
+                        certs.pop().ok_or_else(|| {
+                            anyhow::anyhow!("No x509 certificate found for CA {ca}")
+                        })?
+                    };
                     (key_access, Some((ca_key, cert)))
                 } else {
                     let key_access = db::KeyAccess::get(&mut conn, &key, &user)
@@ -276,26 +244,12 @@ pub async fn manage(command: ManagementCommands, mut config: Config) -> anyhow::
                     (key_access, None)
                 };
 
-                for binding in config
-                    .pkcs11_bindings
-                    .iter_mut()
-                    .filter(|b| b.private_key.is_some())
-                {
-                    let prompt = PromptPassword::new(format!(
-                        "Please enter the user PIN for {}:",
-                        binding
-                            .private_key
-                            .as_ref()
-                            .expect("filter for bindings with private key URIs")
-                    ))?;
-                    let pin = prompt.prompt()?;
-                    binding.pin = Some(pin);
-                }
-                let prompt = format!(
-                    "Enter a password to access the key (at least {} bytes): ",
-                    config.user_password_length.get()
-                );
-                let user_password = password_from_file_or_prompt(&prompt, ca_password_file, 0)?;
+                set_binding_pin(&mut config, pkcs11_binding_pin)?;
+                let user_password = password_from_file_or_prompt(
+                    "Enter the password to access the signing key: ",
+                    ca_password_file,
+                    0,
+                )?;
                 let key_password = decrypt_key_password(
                     &config.pkcs11_bindings,
                     user_password,
@@ -303,6 +257,7 @@ pub async fn manage(command: ManagementCommands, mut config: Config) -> anyhow::
                 )
                 .await?;
 
+                let common_name = common_name.unwrap_or_else(|| key.name.clone());
                 let certificate = crypto::x509_certificate_for_key(
                     &config,
                     key.clone(),
@@ -316,12 +271,62 @@ pub async fn manage(command: ManagementCommands, mut config: Config) -> anyhow::
                 let cert = db::PublicKeyMaterial::create(
                     &mut conn,
                     &key,
-                    common_name,
+                    cert_name,
                     db::PublicKeyMaterialType::X509,
                     certificate,
                 )
                 .await?;
                 println!("Successfully signed certificate:\n{}", cert.data);
+            }
+            KeyCommands::Openpgp {
+                user_name,
+                key_name,
+                cert_name,
+                password_file,
+                pkcs11_binding_pin,
+                validity_days,
+                profile,
+                user_id,
+            } => {
+                let key = db::Key::get(&mut conn, &key_name)
+                    .await
+                    .context("No key with the specified name found")?;
+                let user = db::User::get(&mut conn, &user_name)
+                    .await
+                    .context("The user doesn't exist")?;
+                let key_access = db::KeyAccess::get(&mut conn, &key, &user)
+                    .await
+                    .context("User doesn't have access to the key")?;
+                set_binding_pin(&mut config, pkcs11_binding_pin)?;
+                let user_password = password_from_file_or_prompt(
+                    "Enter the password to access the key: ",
+                    password_file,
+                    0,
+                )?;
+                let key_password = decrypt_key_password(
+                    &config.pkcs11_bindings,
+                    user_password,
+                    &key_access.encrypted_passphrase,
+                )
+                .await?;
+                let certificate = crypto::openpgp_cert_for_key(
+                    &config,
+                    &key,
+                    key_password,
+                    user_id.clone().into(),
+                    profile.into(),
+                    sequoia_openpgp::types::HashAlgorithm::SHA512,
+                    validity_days,
+                )?;
+                let cert = db::PublicKeyMaterial::create(
+                    &mut conn,
+                    &key,
+                    cert_name,
+                    db::PublicKeyMaterialType::OpenPgpCert,
+                    certificate,
+                )
+                .await?;
+                println!("Successfully created OpenPGP certificate:\n{}", cert.data);
             }
             KeyCommands::List {} => {
                 for key in db::Key::list(&mut conn).await? {
@@ -569,7 +574,7 @@ mod tests {
         KeyCommands, ManagementCommands, OpenPgpProfile, Pkcs11Commands, UserCommands,
     };
 
-    use super::manage;
+    use super::{manage, set_binding_pin};
 
     /// Test configuration builder for management tests.
     struct TestConfig {
@@ -823,17 +828,24 @@ mod tests {
                 password_file: Some(password_file),
                 admin: "key-admin".to_string(),
                 name: "test-rsa-key".to_string(),
-                openpgp_profile: OpenPgpProfile::RFC4880,
-                x509_validity_days: 42,
-                x509_common_name: None,
-                x509_ca_key_name: None,
-                x509_ca_cert_name: None,
-                x509_ca_password_file: None,
-                x509_usage: KeyUsage::CodeSigning,
             }),
             test.config().clone(),
         )
         .await?;
+
+        let pool = db::pool(test.config().database().to_str().unwrap(), true).await?;
+        let mut conn = pool.begin().await?;
+        let key = db::Key::get(&mut conn, "test-rsa-key").await?;
+        assert!(
+            db::PublicKeyMaterial::list(&mut conn, &key, db::PublicKeyMaterialType::X509)
+                .await?
+                .is_empty()
+        );
+        assert!(
+            db::PublicKeyMaterial::list(&mut conn, &key, db::PublicKeyMaterialType::OpenPgpCert)
+                .await?
+                .is_empty()
+        );
 
         Ok(())
     }
@@ -853,13 +865,6 @@ mod tests {
                 password_file: Some(password_file),
                 admin: "ec-admin".to_string(),
                 name: "test-ec-key".to_string(),
-                openpgp_profile: OpenPgpProfile::RFC4880,
-                x509_validity_days: 42,
-                x509_common_name: None,
-                x509_ca_key_name: None,
-                x509_ca_cert_name: None,
-                x509_ca_password_file: None,
-                x509_usage: KeyUsage::CodeSigning,
             }),
             test.config().clone(),
         )
@@ -883,13 +888,6 @@ mod tests {
                 password_file: Some(password_file),
                 admin: "key-admin".to_string(),
                 name: "test-key".to_string(),
-                openpgp_profile: OpenPgpProfile::RFC4880,
-                x509_validity_days: 42,
-                x509_common_name: None,
-                x509_ca_key_name: None,
-                x509_ca_cert_name: None,
-                x509_ca_password_file: None,
-                x509_usage: KeyUsage::CodeSigning,
             }),
             test.config().clone(),
         )
@@ -913,19 +911,57 @@ mod tests {
                 password_file: Some(password_file),
                 admin: "nonexistent-user".to_string(),
                 name: "test-key".to_string(),
-                openpgp_profile: OpenPgpProfile::RFC4880,
-                x509_validity_days: 42,
-                x509_common_name: None,
-                x509_ca_key_name: None,
-                x509_ca_cert_name: None,
-                x509_ca_password_file: None,
-                x509_usage: KeyUsage::CodeSigning,
             }),
             test.config().clone(),
         )
         .await;
 
         assert!(result.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn openpgp_certificate() -> Result<()> {
+        let test = TestConfig::new(false).await?;
+        test.migrate().await?;
+        test.create_user("admin").await?;
+
+        let password_file = test.temp_dir.path().join("password");
+        std::fs::write(&password_file, "secret-password\n")?;
+        manage(
+            ManagementCommands::Key(KeyCommands::Create {
+                algorithm: KeyAlgorithm::Rsa4K,
+                password_file: Some(password_file.clone()),
+                admin: "admin".to_string(),
+                name: "openpgp-key".to_string(),
+            }),
+            test.config().clone(),
+        )
+        .await?;
+        manage(
+            ManagementCommands::Key(KeyCommands::Openpgp {
+                user_name: "admin".to_string(),
+                key_name: "openpgp-key".to_string(),
+                cert_name: "openpgp-cert".to_string(),
+                password_file: Some(password_file),
+                pkcs11_binding_pin: None,
+                validity_days: 30,
+                profile: OpenPgpProfile::RFC4880,
+                user_id: "Test Signing <sign@example.com>".to_string(),
+            }),
+            test.config().clone(),
+        )
+        .await?;
+
+        let pool = db::pool(test.config().database().to_str().unwrap(), true).await?;
+        let mut conn = pool.begin().await?;
+        let key = db::Key::get(&mut conn, "openpgp-key").await?;
+        let certs =
+            db::PublicKeyMaterial::list(&mut conn, &key, db::PublicKeyMaterialType::OpenPgpCert)
+                .await?;
+        assert_eq!(certs.len(), 1);
+        assert_eq!(certs.first().unwrap().name, "openpgp-cert");
+
         Ok(())
     }
 
@@ -944,13 +980,6 @@ mod tests {
                 password_file: Some(password_file.clone()),
                 admin: "admin".to_string(),
                 name: "ca-key".to_string(),
-                openpgp_profile: OpenPgpProfile::RFC4880,
-                x509_validity_days: 42,
-                x509_common_name: None,
-                x509_ca_key_name: None,
-                x509_ca_cert_name: None,
-                x509_ca_password_file: None,
-                x509_usage: KeyUsage::CodeSigning,
             }),
             test.config().clone(),
         )
@@ -959,11 +988,14 @@ mod tests {
             ManagementCommands::Key(KeyCommands::X509 {
                 user_name: "admin".to_string(),
                 key_name: "ca-key".to_string(),
+                cert_name: "ca-cert".to_string(),
                 usage: KeyUsage::CertificateAuthority,
-                common_name: "Test CA".to_string(),
+                common_name: Some("Test CA".to_string()),
                 validity_days: std::num::NonZeroU32::new(30).unwrap(),
-                certificate_authority: None,
+                ca_key_name: None,
+                ca_cert_name: None,
                 ca_password_file: Some(password_file),
+                pkcs11_binding_pin: None,
             }),
             test.config().clone(),
         )
@@ -990,13 +1022,6 @@ mod tests {
                 password_file: Some(ca_password_file.clone()),
                 admin: "admin".to_string(),
                 name: "ca-key".to_string(),
-                openpgp_profile: OpenPgpProfile::RFC4880,
-                x509_validity_days: 42,
-                x509_common_name: None,
-                x509_ca_key_name: None,
-                x509_ca_cert_name: None,
-                x509_ca_password_file: None,
-                x509_usage: KeyUsage::CodeSigning,
             }),
             test.config().clone(),
         )
@@ -1005,11 +1030,14 @@ mod tests {
             ManagementCommands::Key(KeyCommands::X509 {
                 user_name: "admin".to_string(),
                 key_name: "ca-key".to_string(),
+                cert_name: "ca-cert".to_string(),
                 usage: KeyUsage::CertificateAuthority,
-                common_name: "Test CA".to_string(),
+                common_name: Some("Test CA".to_string()),
                 validity_days: std::num::NonZeroU32::new(365).unwrap(),
-                certificate_authority: None,
+                ca_key_name: None,
+                ca_cert_name: None,
                 ca_password_file: Some(ca_password_file.clone()),
+                pkcs11_binding_pin: None,
             }),
             test.config().clone(),
         )
@@ -1021,13 +1049,6 @@ mod tests {
                 password_file: Some(key_password_file),
                 admin: "admin".to_string(),
                 name: "codesigning-key".to_string(),
-                openpgp_profile: OpenPgpProfile::RFC4880,
-                x509_validity_days: 42,
-                x509_common_name: None,
-                x509_ca_key_name: None,
-                x509_ca_cert_name: None,
-                x509_ca_password_file: None,
-                x509_usage: KeyUsage::CodeSigning,
             }),
             test.config().clone(),
         )
@@ -1036,11 +1057,14 @@ mod tests {
             ManagementCommands::Key(KeyCommands::X509 {
                 user_name: "admin".to_string(),
                 key_name: "codesigning-key".to_string(),
+                cert_name: "codesigning-cert".to_string(),
                 usage: KeyUsage::CodeSigning,
-                common_name: "Test Code Signing".to_string(),
+                common_name: Some("Test Code Signing".to_string()),
                 validity_days: std::num::NonZeroU32::new(30).unwrap(),
-                certificate_authority: Some("ca-key".to_string()),
+                ca_key_name: Some("ca-key".to_string()),
+                ca_cert_name: Some("ca-cert".to_string()),
                 ca_password_file: Some(ca_password_file),
+                pkcs11_binding_pin: None,
             }),
             test.config().clone(),
         )
@@ -1066,13 +1090,6 @@ mod tests {
                 password_file: Some(password_file),
                 admin: "admin".to_string(),
                 name: "test-key".to_string(),
-                openpgp_profile: OpenPgpProfile::RFC4880,
-                x509_validity_days: 42,
-                x509_common_name: None,
-                x509_ca_key_name: None,
-                x509_ca_cert_name: None,
-                x509_ca_password_file: None,
-                x509_usage: KeyUsage::CodeSigning,
             }),
             test.config().clone(),
         )
@@ -1081,11 +1098,14 @@ mod tests {
             ManagementCommands::Key(KeyCommands::X509 {
                 user_name: "admin".to_string(),
                 key_name: "test-key".to_string(),
+                cert_name: "test-cert".to_string(),
                 usage: KeyUsage::CertificateAuthority,
-                common_name: "Test".to_string(),
+                common_name: Some("Test".to_string()),
                 validity_days: std::num::NonZeroU32::new(30).unwrap(),
-                certificate_authority: None,
+                ca_key_name: None,
+                ca_cert_name: None,
                 ca_password_file: Some(wrong_password_file),
+                pkcs11_binding_pin: None,
             }),
             test.config().clone(),
         )
@@ -1110,13 +1130,6 @@ mod tests {
                 password_file: Some(password_file.clone()),
                 admin: "admin".to_string(),
                 name: "test-key".to_string(),
-                openpgp_profile: OpenPgpProfile::RFC4880,
-                x509_validity_days: 42,
-                x509_common_name: None,
-                x509_ca_key_name: None,
-                x509_ca_cert_name: None,
-                x509_ca_password_file: None,
-                x509_usage: KeyUsage::CodeSigning,
             }),
             test.config().clone(),
         )
@@ -1125,11 +1138,14 @@ mod tests {
             ManagementCommands::Key(KeyCommands::X509 {
                 user_name: "admin".to_string(),
                 key_name: "test-key".to_string(),
+                cert_name: "test-cert".to_string(),
                 usage: KeyUsage::CodeSigning,
-                common_name: "Test".to_string(),
+                common_name: Some("Test".to_string()),
                 validity_days: std::num::NonZeroU32::new(30).unwrap(),
-                certificate_authority: Some("nonexistent-ca".to_string()),
+                ca_key_name: Some("nonexistent-ca".to_string()),
+                ca_cert_name: None,
                 ca_password_file: Some(password_file),
+                pkcs11_binding_pin: None,
             }),
             test.config().clone(),
         )
@@ -1286,13 +1302,6 @@ mod tests {
                 password_file: Some("/path/does/not/exist".into()),
                 admin: "admin".to_string(),
                 name: "test-rsa-key".to_string(),
-                openpgp_profile: OpenPgpProfile::RFC4880,
-                x509_validity_days: 42,
-                x509_common_name: None,
-                x509_ca_key_name: None,
-                x509_ca_cert_name: None,
-                x509_ca_password_file: None,
-                x509_usage: KeyUsage::CodeSigning,
             }),
             ManagementCommands::Pkcs11(Pkcs11Commands::Register {
                 module: PathBuf::from("/usr/lib64/pkcs11/libkryoptic_pkcs11.so"),
@@ -1332,13 +1341,6 @@ mod tests {
                 password_file: Some("/path/does/not/exist".into()),
                 admin: "admin".to_string(),
                 name: "test-rsa-key".to_string(),
-                openpgp_profile: OpenPgpProfile::RFC4880,
-                x509_validity_days: 42,
-                x509_common_name: None,
-                x509_ca_key_name: None,
-                x509_ca_cert_name: None,
-                x509_ca_password_file: None,
-                x509_usage: KeyUsage::CodeSigning,
             }),
             ManagementCommands::Pkcs11(Pkcs11Commands::Register {
                 module: PathBuf::from("/usr/lib64/pkcs11/libkryoptic_pkcs11.so"),
@@ -1381,13 +1383,6 @@ mod tests {
             password_file: Some(password_file.clone()),
             admin: "admin".to_string(),
             name: "test-rsa-key".to_string(),
-            openpgp_profile: OpenPgpProfile::RFC4880,
-            x509_validity_days: 42,
-            x509_common_name: None,
-            x509_ca_key_name: None,
-            x509_ca_cert_name: None,
-            x509_ca_password_file: None,
-            x509_usage: KeyUsage::CodeSigning,
         })];
 
         for command in commands {
@@ -1412,6 +1407,57 @@ mod tests {
             )
             .await?;
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn set_binding_pin_from_file() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let pin_file = temp_dir.path().join("binding_pin");
+        std::fs::write(&pin_file, "very-secret\n")?;
+
+        let mut config = Config {
+            pkcs11_bindings: vec![siguldry::server::Pkcs11Binding {
+                certificate: temp_dir.path().join("cert.pem"),
+                private_key: Some("pkcs11:object=test-key;type=private".to_string()),
+                pin: None,
+            }],
+            ..Default::default()
+        };
+
+        set_binding_pin(&mut config, Some(pin_file))?;
+
+        let pin = config
+            .pkcs11_bindings
+            .first()
+            .unwrap()
+            .pin
+            .as_ref()
+            .expect("binding PIN should be read from the file");
+        assert!(pin.map(|bytes| **bytes == *b"very-secret"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn set_binding_pin_rejects_pin_file_with_multiple_bindings() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let pin_file = temp_dir.path().join("binding_pin");
+        std::fs::write(&pin_file, "which-token-is-this-pin-for?\n")?;
+
+        let binding = |id: &str| siguldry::server::Pkcs11Binding {
+            certificate: temp_dir.path().join("cert.pem"),
+            private_key: Some(format!("pkcs11:object=test-key-{id};type=private")),
+            pin: None,
+        };
+        let mut config = Config {
+            pkcs11_bindings: vec![binding("a"), binding("b")],
+            ..Default::default()
+        };
+
+        let result = set_binding_pin(&mut config, Some(pin_file));
+        assert!(result.is_err());
 
         Ok(())
     }

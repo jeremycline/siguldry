@@ -207,64 +207,18 @@ pub enum Pkcs11Commands {
 pub enum KeyCommands {
     /// Generate a new signing key.
     ///
-    /// Note that all keys are created with an OpenPGP certificate and an X509 certificate. If you
-    /// only plan to use the key for OpenPGP signatures you can safely use the default X509
-    /// settings; similarly if you don't plan on using the key for OpenPGP you can safely use the
-    /// default OpenPGP settings.
+    /// Once a key pair is generated, you can create an X509 certificate for it with the "x509" key
+    /// subcommand or an OpenPGP certificate with the "openpgp" subcommand. Keys can be used for
+    /// both X509 and OpenPGP as long as the key type is valid for both.
     ///
-    /// For OpenPGP certificates, the server configuration file contains the user ID (email,
-    /// typically) to use. Similarly, the X509 subject is configured in the server configuration
-    /// file except for the common name.
+    /// OpenPGP only accepts some keys as part of a hybrid key pair. In particular, ML-DSA-65 is only
+    /// allowed with an Ed25519 key pair, and ML-DSA-87 is only allowed with an Ed448 key pair. To
+    /// create a hybrid pair, first generate the two keys separately and then associate them with
+    /// the "associate-hybrid" subcommand.
     Create {
         /// The key algorithm to use.
         #[arg(short, long, value_enum, default_value_t)]
         algorithm: KeyAlgorithm,
-
-        /// The OpenPGP standard to use; until you're certain all clients support the modern
-        /// RFC9580 profile, it's best to stick with the default RFC4880 profile.
-        ///
-        /// Note that all keys are created with an OpenPGP certificate. If you don't plan to use this key
-        /// for OpenPGP signatures the defaults are fine.
-        #[arg(long, value_enum, default_value_t)]
-        openpgp_profile: OpenPgpProfile,
-
-        /// The length of time the X509 certificate is valid for in days (starts from the current time).
-        #[arg(long, default_value = "730", value_parser = clap::value_parser!(u32).range(1..))]
-        x509_validity_days: u32,
-
-        /// The Common Name field to use in the certificate; the remaining portions of the subject are
-        /// specified in the server configuration.
-        ///
-        /// If not provided, the default is the key's name.
-        #[arg(long, default_value = None)]
-        x509_common_name: Option<String>,
-
-        /// The name of the key to use when signing the key's x509 certificate.
-        ///
-        /// If this is not provided, the certificate will be self-signed.
-        #[arg(long, default_value = None)]
-        x509_ca_key_name: Option<String>,
-
-        /// The name of the certificate associated with the --x509-ca-key-name.
-        ///
-        /// Keys may have multiple certificates associated with them. If unspecified, the
-        /// most recently created certificate associated with the key is used.
-        #[arg(long, default_value = None)]
-        x509_ca_cert_name: Option<String>,
-
-        /// A file containing the password needed to unlock and use the certificate authority's key.
-        ///
-        /// This is not needed for self-signed certificates.
-        ///
-        /// The file should include the password on the first line and the file should include a newline.
-        /// If this option is not provided AND the --x509-certificate-authority argument has been provided,
-        /// The user is prompted to provide the password via stdin.
-        #[arg(long, default_value = None)]
-        x509_ca_password_file: Option<PathBuf>,
-
-        /// The planned usage of the key.
-        #[arg(long, value_enum, default_value_t)]
-        x509_usage: siguldry::server::crypto::KeyUsage,
 
         /// A file containing the password needed to unlock and use the key.
         ///
@@ -282,36 +236,122 @@ pub enum KeyCommands {
         name: String,
     },
 
-    /// Create additional x509 certificates for a key.
+    /// Create an x509 certificates for a key.
     X509 {
         /// The user to authenticate as; this user must have access to the key used to sign the certificate.
         #[arg(short, long)]
         user_name: String,
+
         /// The name of the key in Siguldry to create a certificate for.
         #[arg(short, long)]
         key_name: String,
+
+        /// The name to give to the new certificate.
+        ///
+        /// A key can have multiple certificates, so this must be unique with respect to the key.
+        #[arg(short, long)]
+        cert_name: String,
+
         /// The Common Name field to use in the certificate; the remaining portions of the subject are
         /// specified in the server configuration.
-        #[arg(short, long)]
-        common_name: String,
+        ///
+        /// If not provided, the default is the key's name.
+        #[arg(long, default_value = None)]
+        common_name: Option<String>,
+
         /// The length of time the certificate is valid for in days (starts from the current time).
-        #[arg(long)]
+        #[arg(long, default_value = "730")]
         validity_days: NonZeroU32,
+
         /// The name of the key to use when signing the key's x509 certificate.
         ///
         /// For certificate authorities, leave this blank to self-sign.
-        #[arg(long)]
-        certificate_authority: Option<String>,
+        #[arg(long, default_value = None)]
+        ca_key_name: Option<String>,
+
+        /// The name of the certificate associated with the key specified in --ca-key-name.
+        ///
+        /// Keys may have multiple certificates associated with them. If unspecified, the
+        /// most recently created certificate associated with the key is used.
+        #[arg(long, default_value = None)]
+        ca_cert_name: Option<String>,
+
         /// A file containing the password needed to unlock and use the certificate authority's key.
+        ///
+        /// If this is a self-signed certificate, the password for the key specified in --key-name is
+        /// required.
         ///
         /// The file should include the password on the first line and the file should include a newline.
         /// If this option is not provided, input is read from stdin.
         #[arg(long, default_value = None)]
         ca_password_file: Option<PathBuf>,
-        /// The purpose of the key.
-        #[arg(value_enum)]
+
+        /// A file containing the PIN for the PKCS#11 token used in binding (if any).
+        ///
+        /// The file should include the PIN on the first line and the file should include a newline.
+        /// If this option is not provided, input is read from stdin (if binding is configured).
+        #[arg(long, default_value = None)]
+        pkcs11_binding_pin: Option<PathBuf>,
+
+        /// The planned usage of the key.
+        #[arg(long, value_enum, default_value_t)]
         usage: siguldry::server::crypto::KeyUsage,
     },
+
+    /// Create an OpenPGP certificate for a key.
+    ///
+    /// Not all key types supported by Siguldry can be used for OpenPGP. At this time,
+    /// OpenPGP does not allow plain ML-DSA keys, for example.
+    ///
+    /// Note that if you plan to use this key from a client via gnupg-pkcs11-scd, you
+    /// must also create an X509 certificate for the key pair, or the key will NOT be
+    /// discovered.
+    Openpgp {
+        /// The user to authenticate as; this user must have access to the key.
+        #[arg(short, long)]
+        user_name: String,
+
+        /// The name of the key in Siguldry to create an OpenPGP certificate for.
+        #[arg(short, long)]
+        key_name: String,
+
+        /// A file containing the password needed to unlock and use the key.
+        ///
+        /// The file should include the password on the first line and the file should include a newline.
+        /// If this option is not provided, input is read from stdin.
+        #[arg(long, default_value = None)]
+        password_file: Option<PathBuf>,
+
+        /// A file containing the PIN for the PKCS#11 token used in binding (if any).
+        ///
+        /// The file should include the PIN on the first line and the file should include a newline.
+        /// If this option is not provided, input is read from stdin (if binding is configured).
+        #[arg(long, default_value = None)]
+        pkcs11_binding_pin: Option<PathBuf>,
+
+        /// The length of time the certificate is valid for in days (starts from the current time).
+        ///
+        /// The default, zero, means no expiration date.
+        #[arg(long, default_value_t = 0)]
+        validity_days: u32,
+
+        /// The OpenPGP standard to use; until you're certain all clients support the modern
+        /// RFC9580 profile, it's best to stick with the default RFC4880 profile.
+        #[arg(long, value_enum, default_value_t)]
+        profile: OpenPgpProfile,
+
+        /// The name to give to the new certificate.
+        ///
+        /// A key can have multiple certificates, so this must be unique with respect to the key.
+        #[arg(short, long)]
+        cert_name: String,
+
+        /// The user ID to use for the OpenPGP certificate.
+        ///
+        /// This is typically an email like "Signing Key <signing@example.com>"
+        user_id: String,
+    },
+
     /// List available keys.
     List {},
 }

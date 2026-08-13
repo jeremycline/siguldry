@@ -115,7 +115,7 @@ Users can also have their access to signing keys granted or revoked with the `gr
 
 Keys can be managed with `siguldry-server manage key` subcommands.
 
-For example, to create a key:
+For example, to create a new key pair:
 
 ```bash
 systemd-run --pty --wait --collect \
@@ -132,8 +132,27 @@ key, so it should be a long, random value that you store safely in a credential 
 Review the help text for `key create` as there are a number of optional values to control the key
 type.
 
+A key pair alone is usually not everything you need. You usually want either an X509 or OpenPGP
+certificate based on how you want to sign content.
+
 > [!NOTE]
-> Keys are created with both X.509 certificates and OpenPGP certificates
+> A key can have multiple X509 and OpenPGP certificates associated with it.
+
+```bash
+systemd-run --pty --wait --collect \
+  --working-directory=/var/lib/siguldry \
+  --setenv=SIGULDRY_SERVER_CONFIG=/etc/siguldry/server.toml \
+  --uid=siguldry \
+  --gid=siguldry \
+  siguldry-server manage key x509 --user-name jcline --key-name test-key --cert-name test-x509-cert
+
+systemd-run --pty --wait --collect \
+  --working-directory=/var/lib/siguldry \
+  --setenv=SIGULDRY_SERVER_CONFIG=/etc/siguldry/server.toml \
+  --uid=siguldry \
+  --gid=siguldry \
+  siguldry-server manage key openpgp --user-name jcline --key-name test-key --cert-name test-openpgp-cert "Test Signing <signing@example.com>"
+```
 
 ### Services
 
