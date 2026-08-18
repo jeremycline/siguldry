@@ -750,3 +750,251 @@ impl From<JoinError> for ServerError {
         Self::Internal
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serialize_outer_messages() {
+        let session_id = Uuid::nil();
+        assert_eq!(
+            serde_json::to_string(&OuterRequest {
+                session_id,
+                request_id: 42,
+                request: Request::WhoAmI {},
+            })
+            .unwrap(),
+            concat!(
+                r#"{"session_id":"00000000-0000-0000-0000-000000000000","#,
+                r#""request_id":42,"request":{"who_am_i":{}}}"#,
+            ),
+        );
+        assert_eq!(
+            serde_json::to_string(&OuterResponse {
+                session_id,
+                request_id: 42,
+                response: Response::WhoAmI {
+                    user: "adent".into(),
+                },
+            })
+            .unwrap(),
+            concat!(
+                r#"{"session_id":"00000000-0000-0000-0000-000000000000","#,
+                r#""request_id":42,"response":{"who_am_i":{"user":"adent"}}}"#,
+            ),
+        );
+    }
+
+    #[test]
+    fn serialize_requests() {
+        let requests = [
+            (Request::WhoAmI {}, r#"{"who_am_i":{}}"#),
+            (Request::ListKeys {}, r#"{"list_keys":{}}"#),
+            (
+                Request::Unlock {
+                    key: "test-key".into(),
+                    password: "password".into(),
+                },
+                r#"{"unlock":{"key":"test-key","password":"password"}}"#,
+            ),
+            (
+                Request::Sign {
+                    key: "test-key".into(),
+                    digest_algorithm: DigestAlgorithm::Sha256,
+                    digest: "abc123".into(),
+                },
+                r#"{"sign":{"key":"test-key","digest_algorithm":"Sha256","digest":"abc123"}}"#,
+            ),
+            (
+                Request::SignAll {
+                    key: "test-key".into(),
+                    digests: vec![
+                        (DigestAlgorithm::Sha3_256, "abc123".into()),
+                        (DigestAlgorithm::Sha3_512, "abc123".into()),
+                    ],
+                },
+                concat!(
+                    r#"{"sign_all":{"key":"test-key","digests":["#,
+                    r#"["Sha3_256","abc123"],["Sha3_512","abc123"]]}}"#,
+                ),
+            ),
+            (
+                Request::GetKey {
+                    key: "test-key".into(),
+                },
+                r#"{"get_key":{"key":"test-key"}}"#,
+            ),
+        ];
+
+        for (request, expected) in requests {
+            assert_eq!(serde_json::to_string(&request).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn serialize_responses() {
+        let responses = [
+            (
+                Response::WhoAmI {
+                    user: "adent".into(),
+                },
+                r#"{"who_am_i":{"user":"adent"}}"#,
+            ),
+            (
+                Response::ListKeys { keys: vec![] },
+                r#"{"list_keys":{"keys":[]}}"#,
+            ),
+            (Response::Unlock {}, r#"{"unlock":{}}"#),
+            (
+                Response::GetKey {
+                    key: Key {
+                        name: "test-key".into(),
+                        key_algorithm: KeyAlgorithm::P256,
+                        handle: "key-handle".into(),
+                        public_key: "public key".into(),
+                        certificates: vec![],
+                    },
+                },
+                concat!(
+                    r#"{"get_key":{"key":{"name":"test-key","#,
+                    r#""key_algorithm":"P256","handle":"key-handle","#,
+                    r#""public_key":"public key","certificates":[]}}}"#,
+                ),
+            ),
+            (
+                Response::Sign {
+                    signature: Signature {
+                        signature: SignaturePayload::RSA(vec![0, 0, 0]),
+                        digest: DigestAlgorithm::Sha256,
+                        hash: "abc123".into(),
+                    },
+                },
+                concat!(
+                    r#"{"sign":{"signature":{"signature":{"RSA":"AAAA"},"#,
+                    r#""digest":"Sha256","hash":"abc123"}}}"#,
+                ),
+            ),
+            (
+                Response::SignPrehashed {
+                    signatures: vec![Signature {
+                        signature: SignaturePayload::RSA(vec![0, 0, 0]),
+                        digest: DigestAlgorithm::Sha256,
+                        hash: "abc123".into(),
+                    }],
+                },
+                concat!(
+                    r#"{"sign_prehashed":{"signatures":[{"#,
+                    r#""signature":{"RSA":"AAAA"},"digest":"Sha256","#,
+                    r#""hash":"abc123"}]}}"#,
+                ),
+            ),
+            (
+                Response::Error {
+                    reason: ServerError::RequiresAdmin,
+                },
+                r#"{"error":{"reason":"requires_admin"}}"#,
+            ),
+            (Response::Unsupported, r#""unsupported""#),
+        ];
+
+        for (response, expected) in responses {
+            assert_eq!(serde_json::to_string(&response).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn serialize_signatures() {
+        assert_eq!(
+            serde_json::to_string(&Signature {
+                signature: SignaturePayload::RSA(vec![0, 0, 0]),
+                digest: DigestAlgorithm::Sha256,
+                hash: "abc123".into(),
+            })
+            .unwrap(),
+            r#"{"signature":{"RSA":"AAAA"},"digest":"Sha256","hash":"abc123"}"#,
+        );
+
+        let payloads = [
+            (SignaturePayload::RSA(vec![0, 0, 0]), r#"{"RSA":"AAAA"}"#),
+            (SignaturePayload::P256(vec![8, 1, 68]), r#"{"P256":"CAFE"}"#),
+        ];
+
+        for (payload, expected) in payloads {
+            assert_eq!(serde_json::to_string(&payload).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn serialize_key() {
+        let key = Key {
+            name: "test-key".into(),
+            key_algorithm: KeyAlgorithm::P256,
+            handle: "key-handle".into(),
+            public_key: "public key".into(),
+            certificates: vec![Certificate {
+                certificate: "certificate".into(),
+                certificate_type: CertificateType::X509,
+                fingerprint: "fingerprint".into(),
+                name: "test-certificate".into(),
+            }],
+        };
+        assert_eq!(
+            serde_json::to_string(&key).unwrap(),
+            concat!(
+                r#"{"name":"test-key","key_algorithm":"P256","#,
+                r#""handle":"key-handle","public_key":"public key","#,
+                r#""certificates":[{"certificate":"certificate","#,
+                r#""certificate_type":"X509","fingerprint":"fingerprint","#,
+                r#""name":"test-certificate"}]}"#,
+            ),
+        );
+
+        let certificate_types = [
+            (CertificateType::Pgp, r#""Pgp""#),
+            (CertificateType::X509, r#""X509""#),
+        ];
+        for (certificate_type, expected) in certificate_types {
+            assert_eq!(serde_json::to_string(&certificate_type).unwrap(), expected);
+        }
+
+        let key_algorithms = [
+            (KeyAlgorithm::Rsa2K, r#""Rsa2K""#),
+            (KeyAlgorithm::Rsa4K, r#""Rsa4K""#),
+            (KeyAlgorithm::P256, r#""P256""#),
+        ];
+        for (key_algorithm, expected) in key_algorithms {
+            assert_eq!(serde_json::to_string(&key_algorithm).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn serialize_digest_algorithms() {
+        let digest_algorithms = [
+            (DigestAlgorithm::Sha256, r#""Sha256""#),
+            (DigestAlgorithm::Sha512, r#""Sha512""#),
+            (DigestAlgorithm::Sha3_256, r#""Sha3_256""#),
+            (DigestAlgorithm::Sha3_512, r#""Sha3_512""#),
+        ];
+
+        for (digest_algorithm, expected) in digest_algorithms {
+            assert_eq!(serde_json::to_string(&digest_algorithm).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn serialize_server_errors() {
+        let errors = [
+            (
+                ServerError::NoSuchUser("jcline".into()),
+                r#"{"no_such_user":"jcline"}"#,
+            ),
+            (ServerError::RequiresAdmin, r#""requires_admin""#),
+            (ServerError::Internal, r#""internal""#),
+        ];
+
+        for (error, expected) in errors {
+            assert_eq!(serde_json::to_string(&error).unwrap(), expected);
+        }
+    }
+}
