@@ -14,7 +14,7 @@
 //!
 //! To validate your configuration, refer to the `sigul-pesign-bridge config` command.
 
-use std::{num::NonZeroU64, path::PathBuf};
+use std::{collections::HashMap, num::NonZeroU64, path::PathBuf};
 
 use anyhow::{Context, anyhow};
 use serde::{Deserialize, Serialize};
@@ -38,6 +38,36 @@ pub struct Config {
 
     /// Configuration to connect to the Sigul server.
     pub sigul: Siguldry,
+
+    /// Submit files for signing using `az xsign sign-file` instead of forwarding the request
+    /// to the Sigul server.
+    #[serde(default)]
+    pub xsign_enabled: bool,
+
+    /// Directory containing ESRP xsign configuration files. For a request with
+    /// signer name, the service uses the corresponding ESRP key code from
+    /// `azl_signer_to_esrp_keycode` to select
+    /// `<xsign_config_dir>/<ESRP key code>.json`.
+    ///
+    /// This path is only used when `xsign_enabled` is true.
+    #[serde(default = "default_xsign_config_dir")]
+    pub xsign_config_dir: PathBuf,
+
+    /// Mapping from signer names to ESRP xsign key codes.
+    #[serde(default)]
+    pub azl_signer_to_esrp_keycode: HashMap<String, String>,
+
+    /// Sign files locally with `pesign` and the configured NSS DB instead of forwarding
+    /// the request to the Sigul server.
+    ///
+    /// `xsign_enabled` takes precedence when both options are enabled.
+    #[serde(default)]
+    pub self_sign_enabled: bool,
+
+    /// Directory containing the NSS DB used by `pesign` for local
+    /// self-signing.
+    #[serde(default = "default_self_sign_nssdb_dir")]
+    pub self_sign_nssdb_dir: PathBuf,
 
     /// A list of signing keys available for use.
     ///
@@ -197,6 +227,11 @@ impl Config {
     /// If the referenced files don't exist, an error is returned.
     #[doc(hidden)]
     pub fn fix_credentials(&mut self, credentials_dir: &std::path::Path) -> anyhow::Result<()> {
+        if self.xsign_enabled || self.self_sign_enabled {
+            // Signing does not use Sigul so the Sigul connection settings are unused.
+            return Ok(());
+        }
+
         self
             .keys
             .iter_mut()
@@ -273,22 +308,24 @@ impl Config {
     /// values.
     #[doc(hidden)]
     pub fn validate(&self) -> anyhow::Result<()> {
-        self.keys
-            .iter()
-            .map(|key| {
-                key.passphrase()
-                    .inspect_err(|e| tracing::error!(path=?key.passphrase_path, error=%e))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        if !self.xsign_enabled && !self.self_sign_enabled {
+            self.keys
+                .iter()
+                .map(|key| {
+                    key.passphrase()
+                        .inspect_err(|e| tracing::error!(path=?key.passphrase_path, error=%e))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+        }
 
         self.keys
             .iter()
             .filter_map(|key| key.certificate_file.as_ref())
-            .map(|ca_cert| {
-                if !ca_cert.exists() {
+            .map(|certificate_file| {
+                if !certificate_file.exists() {
                     Err(anyhow::anyhow!(
-                        "The CA file '{}' does not exist",
-                        ca_cert.display()
+                        "The certificate file '{}' does not exist",
+                        certificate_file.display()
                     ))
                 } else {
                     Ok(())
@@ -330,9 +367,22 @@ impl Default for Config {
             sigul_request_timeout_secs: NonZeroU64::new(60).expect("Don't set the default to 0"),
             keys: vec![Key::default()],
             sigul: Siguldry::default(),
+            xsign_enabled: false,
+            xsign_config_dir: default_xsign_config_dir(),
+            azl_signer_to_esrp_keycode: HashMap::new(),
+            self_sign_enabled: false,
+            self_sign_nssdb_dir: default_self_sign_nssdb_dir(),
             socket_acl: vec![],
         }
     }
+}
+
+fn default_xsign_config_dir() -> PathBuf {
+    PathBuf::from("/etc/xsign")
+}
+
+fn default_self_sign_nssdb_dir() -> PathBuf {
+    PathBuf::from("/etc/sigul-pesign-bridge/self-sign/nssdb")
 }
 
 pub(crate) fn load(path: &str) -> anyhow::Result<Config> {

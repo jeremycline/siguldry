@@ -19,6 +19,45 @@ total_request_timeout_secs = 600
 # As such, this value should be several times smaller than `total_request_timeout_secs`.
 sigul_request_timeout_secs = 60
 
+# Optional; sign locally with `az xsign sign-file` instead of forwarding the
+# request to the Sigul server. Defaults to false.
+#
+# The ESRP signing configuration is read from `/etc/xsign`,
+# which must be provisioned outside this service.
+xsign_enabled = false
+
+# Optional; directory containing the certificate-specific xsign configuration
+# files passed to `az xsign sign-file --config-file`. For a request with
+# certificate name `certificate`, the service uses
+# `<xsign_config_dir>/<ESRP key code>.json`. The file must be provisioned outside
+# this service. This setting is only used when `xsign_enabled = true`.
+#
+xsign_config_dir = "/etc/xsign"
+
+# Optional; allows local signing using the NSS DB configured below if the
+# certificate name is set to "secure-boot-self-signing". Defaults to false.
+self_sign_enabled = false
+
+# Optional; NSS DB directory used when `self_sign_enabled = true`. `pesign`
+# signs with the certificate nickname "Secure Boot Self Signing Key". The NSS
+# DB must contain a certificate with that exact nickname. Self-signing is used
+# only for requests whose configured `pesign_certificate_name` is
+# "secure-boot-self-signing". Defaults to "/etc/sigul-pesign-bridge/self-sign/nssdb".
+#
+self_sign_nssdb_dir = "/etc/sigul-pesign-bridge/self-sign/nssdb"
+
+# Mapping from signer names requested by pesign-client to ESRP xsign key codes.
+# Unknown signer names use `default_signer`.
+[azl_signer_to_esrp_keycode]
+grub2_signer = "CP-500049"
+kernel_signer = "CP-500050"
+kernel_module_oot_signer = "CP-500051"
+kernel_partner_module_oot_signer = "CP-500052"
+systemd_boot_signer = "CP-500898"
+uki_signer = "CP-500899"
+verity_signer = "CP-500900"
+default_signer = "CP-500049"
+
 # Configuration to connect to the Sigul server.
 [sigul]
 # The hostname of the Sigul bridge; this is used to verify the bridge's

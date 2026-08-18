@@ -14,9 +14,9 @@
 
 # sigul-pesign-bridge
 
-Drop-in replacement for pesign's daemon that bridges pesign-client requests to a Sigul server.
+Drop-in replacement for pesign's daemon that handles pesign-client requests with a Sigul server, xsign/ESRP server, or self-signing.
 
-The service provides a Unix socket at, by default, `/run/pesign/socket`. `pesign-client` can be used to connect to this socket and request signatures for PE applications. Unlike `pesign`, this implementation forwards the request to a [sigul](https://pagure.io/sigul) signing server.
+The service provides a Unix socket at, by default, `/run/pesign/socket`. `pesign-client` can be used to connect to this socket and request signatures for PE applications. By default, requests are forwarded to a [sigul](https://pagure.io/sigul) signing server. If `xsign_enabled`, requests will be forwarded to xsign/ESRP. If `self_sign_enabled`, signing will be done locally using the provisioned keys.
 
 ## Configuration
 
@@ -48,6 +48,20 @@ total_request_timeout_secs = 600
 # Requests that time out are retried until `total_request_timeout_secs` is reached.
 # As such, this value should be several times smaller than `total_request_timeout_secs`.
 sigul_request_timeout_secs = 60
+
+# Optional local signing backends. Both default to false, which forwards
+# requests to the Sigul server. xsign takes precedence if both are true.
+xsign_enabled = false
+self_sign_enabled = false
+
+# Directory containing certificate-specific `az xsign` JSON configuration.
+xsign_config_dir = "/etc/xsign"
+
+# NSS DB used by `pesign` when `self_sign_enabled = true`. It must contain a
+# certificate with the exact nickname "Secure Boot Self Signing Key".
+# Self-signing is used only for requests whose configured
+# `pesign_certificate_name` is "secure-boot-self-signing".
+self_sign_nssdb_dir = "/etc/sigul-pesign-bridge/self-sign/nssdb"
 
 # Configuration to connect to the Sigul server.
 [sigul]
