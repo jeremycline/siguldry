@@ -3,7 +3,7 @@ name = "siguldry-fedora-autopen"
 license = "MIT"
 edition = { workspace = true }
 rust-version = { workspace = true }
-version = "0.2.0"
+version = "0.2.1"
 readme = "README.md"
 description = """
 An AMQP client to auto-sign Fedora build artifacts
