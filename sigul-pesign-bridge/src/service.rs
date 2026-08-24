@@ -695,9 +695,11 @@ mod tests {
             conn.read_exact(&mut response).await.unwrap();
 
             let mut response = response
-                .chunks_exact(4)
-                .map(|chunk| chunk.try_into().map(u32::from_ne_bytes));
-            let return_code = response.nth(3).unwrap().unwrap();
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| u32::from_ne_bytes(*c));
+            let return_code = response.nth(3).unwrap();
             assert_eq!(0, return_code);
         });
 
