@@ -28,10 +28,10 @@ default-features = false
 features = ["tokio", "openssl"]
 
 [dependencies.metrics]
-version = "0.24"
+version = "0.24.6"
 
 [dependencies.metrics-exporter-prometheus]
-version = "0.18"
+version = "0.18.3"
 default-features = false
 features = ["http-listener"]
 
