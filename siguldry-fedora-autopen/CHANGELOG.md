@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - The dependencies on the `metrics` and `metrics-exporter-prometheus` dependencies now
-  accurately reflects the minimum required version (#???)
+  accurately reflects the minimum required version (#252)
 
 
 ## [0.2.0] - 2026-08-06
