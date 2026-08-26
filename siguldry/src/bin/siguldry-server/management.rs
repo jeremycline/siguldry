@@ -201,7 +201,7 @@ pub async fn manage(command: ManagementCommands, mut config: Config) -> anyhow::
                 let first_key = db::Key::get(&mut conn, &first_key_name)
                     .await
                     .with_context(|| format!("No key with the named '{first_key_name}' found"))?;
-                let second_key = db::Key::get(&mut conn, &first_key_name)
+                let second_key = db::Key::get(&mut conn, &second_key_name)
                     .await
                     .with_context(|| format!("No key with the named '{second_key_name}' found"))?;
 
@@ -416,11 +416,21 @@ pub async fn manage(command: ManagementCommands, mut config: Config) -> anyhow::
                 let cert = db::PublicKeyMaterial::create(
                     &mut conn,
                     &key,
-                    cert_name,
+                    cert_name.clone(),
                     db::PublicKeyMaterialType::OpenPgpCert,
-                    certificate,
+                    certificate.clone(),
                 )
                 .await?;
+                if let Some((hybrid_key, _)) = hybrid {
+                    let _ = db::PublicKeyMaterial::create(
+                        &mut conn,
+                        &hybrid_key,
+                        cert_name,
+                        db::PublicKeyMaterialType::OpenPgpCert,
+                        certificate.clone(),
+                    )
+                    .await?;
+                }
                 println!("Successfully created OpenPGP certificate:\n{}", cert.data);
             }
             KeyCommands::List {} => {

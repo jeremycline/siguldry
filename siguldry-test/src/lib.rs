@@ -143,6 +143,15 @@ pub mod keys {
     pub const PGP_EC_KEY_PASSWORD: &str = "🐉🐉🐉🐉🐉";
     pub const PGP_EC_KEY_EMAIL: &str = "Test Signing <sign@example.com>";
 
+    pub const PGP_MLDSA65_HYBRID_KEY_NAME: &str = "test-pgp-mldsa65-part-key";
+    pub const PGP_ED25519_HYBRID_KEY_NAME: &str = "test-pgp-ed25519-part-key";
+    pub const PGP_MLDSA65_ED25519_KEY_PASSWORD: &str = "🍩🍩🍩🍩🍩🍩";
+    pub const PGP_MLDSA65_ED25519_KEY_EMAIL: &str = "hybrid key <mldsa65+ed25519@example.com>";
+
+    pub const PGP_MLDSA87_ED448_KEY_NAME: &str = "test-pgp-mldsa87-key";
+    pub const PGP_MLDSA87_ED448_KEY_PASSWORD: &str = "🍙🍙🍙🍙";
+    pub const PGP_MLDSA87_ED448_KEY_EMAIL: &str = "hybrid key <mldsa87+ed448@example.com>";
+
     pub const CA_KEY_NAME: &str = "test-ca-key";
     pub const CA_KEY_PASSWORD: &str = "🦀🦀🦀🦀";
 
@@ -205,6 +214,8 @@ pub struct InstanceBuilder {
     with_pgp_rfc9580_keys: bool,
     with_pgp_key: bool,
     with_pgp_ec_key: bool,
+    with_pgp_mldsa65_hybrid: bool,
+    with_pgp_mldsa87_hybrid: bool,
     with_ca_key: bool,
     with_codesigning_key: bool,
     with_ec_key: bool,
@@ -261,6 +272,16 @@ impl InstanceBuilder {
 
     pub fn with_pgp_ec_key(mut self) -> Self {
         self.with_pgp_ec_key = true;
+        self
+    }
+
+    pub fn with_pgp_mldsa87_hybrid_key(mut self) -> Self {
+        self.with_pgp_mldsa87_hybrid = true;
+        self
+    }
+
+    pub fn with_pgp_mldsa65_hybrid_key(mut self) -> Self {
+        self.with_pgp_mldsa65_hybrid = true;
         self
     }
 
@@ -384,6 +405,12 @@ impl InstanceBuilder {
         self.with_ec_key = true;
         self.with_hsm_rsa_key = true;
         self.with_hsm_ec_key = true;
+        self.with_ed25519_key = true;
+        self.with_ed448_key = true;
+        self.with_mldsa65_key = true;
+        self.with_mldsa87_key = true;
+        self.with_pgp_mldsa65_hybrid = true;
+        self.with_pgp_mldsa87_hybrid = true;
         self
     }
 
@@ -631,6 +658,87 @@ impl InstanceBuilder {
                     Some(&stdin),
                 )?;
                 maybe_auto_unlock.push((keys::PGP_EC_KEY_NAME, keys::PGP_EC_KEY_PASSWORD));
+            }
+
+            if self.with_pgp_mldsa65_hybrid {
+                // It's actually two keys in a trenchcoat
+                Self::run_server_command(
+                    &server_bin,
+                    &server_config_file,
+                    &[
+                        "manage",
+                        "key",
+                        "create",
+                        "--algorithm",
+                        "mldsa65",
+                        "siguldry-client",
+                        keys::PGP_MLDSA65_HYBRID_KEY_NAME,
+                    ],
+                    Some(&format!("{}\n", keys::PGP_MLDSA65_ED25519_KEY_PASSWORD)),
+                )?;
+                Self::run_server_command(
+                    &server_bin,
+                    &server_config_file,
+                    &[
+                        "manage",
+                        "key",
+                        "create",
+                        "--algorithm",
+                        "ed25519",
+                        "siguldry-client",
+                        keys::PGP_ED25519_HYBRID_KEY_NAME,
+                    ],
+                    Some(&format!("{}\n", keys::PGP_MLDSA65_ED25519_KEY_PASSWORD)),
+                )?;
+                Self::run_server_command(
+                    &server_bin,
+                    &server_config_file,
+                    &[
+                        "manage",
+                        "key",
+                        "associate-hybrid",
+                        keys::PGP_ED25519_HYBRID_KEY_NAME,
+                        keys::PGP_MLDSA65_HYBRID_KEY_NAME,
+                    ],
+                    None,
+                )?;
+                let stdin = if self.with_pkcs11_binding {
+                    format!(
+                        "{}\n{}\n{}\n",
+                        keys::HSM_PIN,
+                        keys::PGP_MLDSA65_ED25519_KEY_PASSWORD,
+                        keys::PGP_MLDSA65_ED25519_KEY_PASSWORD
+                    )
+                } else {
+                    format!(
+                        "{}\n{}\n",
+                        keys::PGP_MLDSA65_ED25519_KEY_PASSWORD,
+                        keys::PGP_MLDSA65_ED25519_KEY_PASSWORD
+                    )
+                };
+                Self::run_server_command(
+                    &server_bin,
+                    &server_config_file,
+                    &[
+                        "manage",
+                        "key",
+                        "openpgp",
+                        "--user-name=siguldry-client",
+                        format!("--key-name={}", keys::PGP_MLDSA65_HYBRID_KEY_NAME).as_str(),
+                        "--cert-name=openpgp-cert",
+                        format!("--profile=rfc9580").as_str(),
+                        keys::PGP_MLDSA65_ED25519_KEY_EMAIL,
+                    ],
+                    Some(&stdin),
+                )?;
+                maybe_auto_unlock.push((
+                    keys::PGP_MLDSA65_HYBRID_KEY_NAME,
+                    keys::PGP_MLDSA65_ED25519_KEY_PASSWORD,
+                ));
+                maybe_auto_unlock.push((
+                    keys::PGP_ED25519_HYBRID_KEY_NAME,
+                    keys::PGP_MLDSA65_ED25519_KEY_PASSWORD,
+                ));
             }
 
             if self.with_ca_key {
@@ -923,22 +1031,23 @@ impl InstanceBuilder {
             .env("SIGULDRY_SERVER_CONFIG", config_file)
             .args(args);
 
-        if let Some(input) = stdin_input {
+        let result = if let Some(input) = stdin_input {
             command.stdin(Stdio::piped());
             let mut child = command.spawn()?;
             let mut stdin = child.stdin.take().unwrap();
             stdin.write_all(input.as_bytes())?;
             drop(stdin);
-            let result = child.wait_with_output()?;
-            if !result.status.success() {
-                bail!("Command failed: {:?}", args);
-            }
+            child.wait_with_output()
         } else {
-            let result = command.output()?;
-            if !result.status.success() {
-                bail!("Command failed: {:?}", args);
-            }
+            command.output()
+        }?;
+
+        if !result.status.success() {
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            bail!("Command {args:?} failed: stdout:\n{stdout}\nstderr:\n{stderr}\n");
         }
+
         Ok(())
     }
 

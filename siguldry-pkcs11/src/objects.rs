@@ -354,35 +354,36 @@ impl Attribute {
             let cert = sequoia_openpgp::Cert::from_bytes(cert.certificate.as_bytes())?;
             let pgp_key = cert.primary_key().key();
             let version = match (key.hybrid_key_name.is_some(), key.key_algorithm) {
-                (true, KeyAlgorithm::Mldsa65 | KeyAlgorithm::Mldsa87) => {
-                    format!("v{}pq", pgp_key.version())
+                (true, KeyAlgorithm::Mldsa65) => {
+                    format!("v{}pq:mldsa65+ed25519", pgp_key.version())
                 }
-                (
-                    true,
-                    KeyAlgorithm::Ed25519
-                    | KeyAlgorithm::Ed448
-                    | KeyAlgorithm::P256
-                    | KeyAlgorithm::Rsa2K
-                    | KeyAlgorithm::Rsa4K,
-                ) => format!("v{}t", pgp_key.version()),
+                (true, KeyAlgorithm::Ed25519) => format!("v{}t:mldsa65+ed25519", pgp_key.version()),
+                (true, KeyAlgorithm::Mldsa87) => format!("v{}pq:mldsa87+ed448", pgp_key.version()),
+                (true, KeyAlgorithm::Ed448) => format!("v{}t:mldsa87+ed448", pgp_key.version()),
                 (true, algorithm) => {
                     return Err(anyhow::anyhow!("Unsupported key algorithm {algorithm}"));
                 }
-                (false, _algorithm) => format!("v{}", pgp_key.version()),
-            };
-            let key_algo = match key.key_algorithm {
-                KeyAlgorithm::Rsa2K | KeyAlgorithm::Rsa4K => "rsa",
-                KeyAlgorithm::P256 => "ecdsa",
-                KeyAlgorithm::Ed25519 => "ed25519",
-                KeyAlgorithm::Ed448 => "ed448",
-                KeyAlgorithm::Mldsa65 => "mldsa65",
-                KeyAlgorithm::Mldsa87 => "mldsa87",
-                _ => return Err(anyhow::anyhow!("Unsupported key algorithm")),
+                (false, algorithm) => {
+                    let key_algo = match algorithm {
+                        KeyAlgorithm::Rsa2K | KeyAlgorithm::Rsa4K => "rsa",
+                        KeyAlgorithm::P256 => "ecdsa",
+                        KeyAlgorithm::Ed25519 => "ed25519",
+                        KeyAlgorithm::Ed448 => "ed448",
+                        KeyAlgorithm::Mldsa65 => "mldsa65",
+                        KeyAlgorithm::Mldsa87 => "mldsa87",
+                        _ => return Err(anyhow::anyhow!("Unsupported key algorithm")),
+                    };
+
+                    format!("v{}:{key_algo}", pgp_key.version())
+                }
             };
             let creation_time = chrono::DateTime::<chrono::Utc>::from(pgp_key.creation_time())
                 .format("%Y%m%dT%H%M%SZ")
                 .to_string();
-            let id = format!("pgp:{version}:{key_algo}:{creation_time}:{}", key.name);
+            let id = format!(
+                "pgp:{version}:{creation_time}:{}",
+                pgp_key.fingerprint().to_hex()
+            );
             tracing::debug!(
                 fingerprint = pgp_key.fingerprint().to_hex(),
                 id,
