@@ -34,7 +34,7 @@ To build all the components, you need the following system dependencies:
 
 - `cargo`
 - `clang` for libsqlite3-sys
-- `openssl` headers (provided by `openssl-devel` in Fedora and `libssl-dev` in Debian)
+- `openssl` headers, version 3.5 or greater (provided by `openssl-devel` in Fedora and `libssl-dev` in Debian)
 - `sqlite` headers (provided by `sqlite-devel` in Fedora and `libsqlite3-dev` in Debian)
 
 Note that the system-provided version of Cargo on Debian may be too old; in that case you will need

@@ -32,7 +32,7 @@ You will need several header packages installed when using this method:
 
 - `cargo`
 - `clang` for libsqlite3-sys
-- `openssl` headers (provided by `openssl-devel` in Fedora and `libssl-dev` in Debian)
+- `openssl` headers, version 3.5 or greater (provided by `openssl-devel` in Fedora and `libssl-dev` in Debian)
 - `sqlite` headers (provided by `sqlite-devel` in Fedora and `libsqlite3-dev` in Debian)
 
 Be aware, however, that the provided systemd units expect some binaries to be installed into

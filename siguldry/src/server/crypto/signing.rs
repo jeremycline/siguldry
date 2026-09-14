@@ -7,7 +7,14 @@
 //! v1.5, ECDSA, etc).
 
 use anyhow::Context;
-use cryptoki::{mechanism::Mechanism, session::Session};
+use cryptoki::{
+    mechanism::{
+        Mechanism,
+        eddsa::{EddsaParams, EddsaSignatureScheme},
+    },
+    session::Session,
+};
+use foreign_types::ForeignTypeRef;
 use openssl::{pkey::PKey, pkey_ctx::PkeyCtx};
 
 use crate::{
@@ -22,34 +29,178 @@ pub fn sign_with_softkey(
     digests: Vec<(DigestAlgorithm, String)>,
 ) -> anyhow::Result<Vec<protocol::Signature>> {
     let mut signatures = Vec::with_capacity(digests.len());
-    for (algorithm, hex_hash) in digests {
+    for (digest_algorithm, hex_hash) in digests {
         let hash = hex::decode(&hex_hash).context("The digest provided was not valid hex")?;
-        if hash.len() != algorithm.size() {
+        if hash.len() != digest_algorithm.size() {
             return Err(anyhow::anyhow!(
                 "The specified digest algorithm is {} bytes; payload was {}",
-                algorithm.size(),
+                digest_algorithm.size(),
                 hash.len()
             ));
         }
 
-        let mut ctx = PkeyCtx::new(pkey)?;
-        ctx.sign_init()?;
-        ctx.set_signature_md(algorithm.into())?;
-        if key.key_algorithm == KeyAlgorithm::Rsa4K {
-            // PKCS #1 should be the default, but lets be explicit about it.
-            ctx.set_rsa_padding(openssl::rsa::Padding::PKCS1)?;
-        }
-        let mut signature = vec![];
-        ctx.sign_to_vec(&hash, &mut signature)?;
+        let signature = match key.key_algorithm {
+            KeyAlgorithm::Mldsa65 | KeyAlgorithm::Mldsa87 => {
+                if !(pkey.is_a(openssl::pkey::KeyType::ML_DSA_65)
+                    || pkey.is_a(openssl::pkey::KeyType::ML_DSA_87))
+                {
+                    return Err(anyhow::anyhow!(
+                        "Key type claims to be ML-DSA-65 or ML-DSA-87, but isn't according to OpenSSL!"
+                    ));
+                }
+
+                match digest_algorithm {
+                    DigestAlgorithm::MldsaMu => {
+                        // All this gross unsafe stuff can go away once the openssl crate stabilizes a high-level
+                        // interface for signing with ML-DSA keys.
+
+                        let mut context = openssl::md_ctx::MdCtx::new()?;
+                        let pkey_context = context.digest_sign_init(None, pkey)?;
+                        let mut mu_flag: std::ffi::c_int = 1;
+
+                        // Safety:
+                        // From OpenSSL 3.5's documentation for OSSL_PARAM:
+                        //
+                        // 1. OSSL_PARAM_construct_int creates a descriptor referring to the key
+                        //    and C int storage, without taking ownership. `c"mu"` is a static,
+                        //    NUL-terminated CStr. `&raw mut mu_flag` points to a live, aligned
+                        //    c_int initialized to 1. `mu_flag` is neither moved nor modified
+                        //    before the call to set_params below.
+                        // 2. OSSL_PARAM_construct_end produces the null-key sentinel required to
+                        //    terminate an OSSL_PARAM array.
+                        //
+                        // These calls form a properly terminated array of parameters and all
+                        // data lives through its use by set_params.
+                        let parameters = unsafe {
+                            [
+                                openssl_sys::OSSL_PARAM_construct_int(
+                                    c"mu".as_ptr(),
+                                    &raw mut mu_flag,
+                                ),
+                                openssl_sys::OSSL_PARAM_construct_end(),
+                            ]
+                        };
+
+                        // Safety:
+                        //
+                        // EVP_PKEY_CTX_settable_params() requires an initialized context.
+                        // `pkey_context` has been initialized via the call to digest_sign_init(),
+                        // has not been used for a signing operation, and is exclusive so
+                        // the pointer provided is safe for the function to read.
+                        //
+                        // OpenSSL returns null or a borrowed constant array of OSSL_PARAM
+                        // structures that has been propery terminated. We not mutate or
+                        // free the returned value.
+                        let settable_parameters = unsafe {
+                            openssl_sys::EVP_PKEY_CTX_settable_params(pkey_context.as_ptr())
+                        };
+                        if settable_parameters.is_null() {
+                            return Err(anyhow::anyhow!(
+                                "OpenSSL doesn't support any parameters when signing with ML-DSA \
+                                or encountered an error: {:?}",
+                                openssl::error::ErrorStack::get()
+                            ));
+                        }
+
+                        // Safety:
+                        //
+                        // OSSL_PARAM_locate_const() accepts a properly-terminated array of
+                        // OSSL_PARAM structures and a valid C string key to search for. The
+                        // array provided is from the array OpenSSL returned to us in the call
+                        // to EVP_PKEY_CTX_settable_params(), which we have checked to be non-
+                        // NULL. The key provided is a CStr with a static lifetime.
+                        //
+                        // The value returned is not mutated or freed.
+                        let mu_parameter_unsupported = unsafe {
+                            openssl_sys::OSSL_PARAM_locate_const(
+                                settable_parameters,
+                                c"mu".as_ptr(),
+                            )
+                            .is_null()
+                        };
+                        if mu_parameter_unsupported {
+                            return Err(anyhow::anyhow!(
+                                "OpenSSL doesn't support the Mu parameter when signing with ML-DSA"
+                            ));
+                        }
+
+                        // Safety:
+                        //
+                        // EVP_PKEY_CTX_set_params() requires an initialized context and a properly
+                        // terminated array of OSSL_PARAM structures. `pkey_context` has been
+                        // initialized, has not been used for a signing operation, and is exclusive
+                        // so the pointer provided is safe for the function to mutate.
+                        //
+                        // `parameters` is an array of OSSL_PARAM structures with the required
+                        // terminating element, and all the data referenced by those structures
+                        // has not moved, changed, or shared outside this scope. The data remains
+                        // in that state as long as the `pkey_context`, so even if it stores a
+                        // pointer to `mu_flag` rather than copying it, it remains valid for the
+                        // lifetime of the context.
+                        let result = unsafe {
+                            openssl_sys::EVP_PKEY_CTX_set_params(
+                                pkey_context.as_ptr(),
+                                parameters.as_ptr(),
+                            )
+                        };
+                        if result <= 0 {
+                            return Err(openssl::error::ErrorStack::get().into());
+                        }
+
+                        let mut signature = vec![];
+                        context.digest_sign_to_vec(&hash, &mut signature)?;
+
+                        signature
+                    }
+                    _ => {
+                        return Err(anyhow::anyhow!(
+                            "ML-DSA keys only support signing Mu digests"
+                        ));
+                    }
+                }
+            }
+            KeyAlgorithm::Ed25519 | KeyAlgorithm::Ed448 => {
+                let mut signer = openssl::sign::Signer::new_without_digest(pkey)?;
+                signer.sign_oneshot_to_vec(&hash)?
+            }
+            _ => {
+                let md = match digest_algorithm {
+                    DigestAlgorithm::Sha256 => Ok(openssl::md::Md::sha256()),
+                    DigestAlgorithm::Sha512 => Ok(openssl::md::Md::sha512()),
+                    DigestAlgorithm::Sha3_256 => Ok(openssl::md::Md::sha3_256()),
+                    DigestAlgorithm::Sha3_512 => Ok(openssl::md::Md::sha3_512()),
+                    DigestAlgorithm::MldsaMu => Err(anyhow::anyhow!(
+                        "The MldsaMu digest is only supported with ML-DSA key signing"
+                    )),
+                }?;
+                let mut ctx = PkeyCtx::new(pkey)?;
+                ctx.sign_init()?;
+                ctx.set_signature_md(md)?;
+                if matches!(key.key_algorithm, KeyAlgorithm::Rsa2K | KeyAlgorithm::Rsa4K) {
+                    // PKCS #1 should be the default, but lets be explicit about it.
+                    ctx.set_rsa_padding(openssl::rsa::Padding::PKCS1)?;
+                }
+                let mut signature = vec![];
+                ctx.sign_to_vec(&hash, &mut signature)?;
+                signature
+            }
+        };
         let signature = match key.key_algorithm {
             KeyAlgorithm::Rsa2K | KeyAlgorithm::Rsa4K => protocol::SignaturePayload::RSA(signature),
             KeyAlgorithm::P256 => protocol::SignaturePayload::P256(signature),
+            KeyAlgorithm::Ed25519 | KeyAlgorithm::Ed448 => {
+                protocol::SignaturePayload::PureEdDSA(signature)
+            }
+            KeyAlgorithm::Mldsa65 | KeyAlgorithm::Mldsa87 => {
+                protocol::SignaturePayload::PureMLDSA(signature)
+            }
+            _ => return Err(anyhow::anyhow!("Unknown key type requested!")),
         };
 
-        tracing::info!(digest_algorithm=%algorithm, digest=hex_hash, "Signature issued");
+        tracing::info!(digest_algorithm=%digest_algorithm, digest=hex_hash, "Signature issued");
         signatures.push(protocol::Signature {
             signature,
-            digest: algorithm,
+            digest: digest_algorithm,
             hash: hex_hash,
         });
     }
@@ -66,12 +217,12 @@ pub fn sign_with_pkcs11(
     let private_key = key.get_pkcs11_private_key(session)?;
 
     let mut signatures = Vec::with_capacity(digests.len());
-    for (algorithm, hex_hash) in digests {
+    for (digest_algorithm, hex_hash) in digests {
         let hash = hex::decode(&hex_hash).context("The digest provided was not valid hex")?;
-        if hash.len() != algorithm.size() {
+        if hash.len() != digest_algorithm.size() {
             return Err(anyhow::anyhow!(
                 "The specified digest algorithm is {} bytes; payload was {}",
-                algorithm.size(),
+                digest_algorithm.size(),
                 hash.len()
             ));
         }
@@ -83,13 +234,37 @@ pub fn sign_with_pkcs11(
             KeyAlgorithm::Rsa4K | KeyAlgorithm::Rsa2K => {
                 // For RSA PKCS#1 v1.5 with CKM_RSA_PKCS, we need to provide DigestInfo
                 // structure (DER-encoded hash algorithm OID + hash value)
-                let digest_info = crate::der::encode_digest_info(algorithm, &hash)?;
+                let digest_info = crate::der::encode_digest_info(digest_algorithm, &hash)?;
                 (Mechanism::RsaPkcs, digest_info)
             }
             KeyAlgorithm::P256 => {
                 // ECDSA mechanism expects raw hash bytes
                 (Mechanism::Ecdsa, hash)
             }
+            KeyAlgorithm::Ed25519 | KeyAlgorithm::Ed448 => (
+                Mechanism::Eddsa(EddsaParams::new(EddsaSignatureScheme::Pure)),
+                hash,
+            ),
+            KeyAlgorithm::Mldsa65 | KeyAlgorithm::Mldsa87 => {
+                match digest_algorithm {
+                    DigestAlgorithm::MldsaMu => {
+                        // Support for signing Mu values is supposed to arrive with PKCS#11 version 3.3. For the time
+                        // being, we can't support signing with ML-DSA using PKCS#11-backed keys. In the future this
+                        // can be replaced with something like:
+                        //
+                        // (Mechanism::MldsaMu(SignAdditionalContext::new(hedge_type, None)), hash)
+                        return Err(anyhow::anyhow!(
+                            "PKCS#11 version 3.2 does not support signing Mu values"
+                        ));
+                    }
+                    _ => {
+                        return Err(anyhow::anyhow!(
+                            "ML-DSA keys only support signing Mu digests"
+                        ));
+                    }
+                }
+            }
+            _ => return Err(anyhow::anyhow!("Unknown key type requested!")),
         };
 
         let signature = session
@@ -113,12 +288,15 @@ pub fn sign_with_pkcs11(
                 let ecdsa_sig = openssl::ecdsa::EcdsaSig::from_private_components(r, s)?;
                 SignaturePayload::P256(ecdsa_sig.to_der()?)
             }
+            KeyAlgorithm::Ed25519 | KeyAlgorithm::Ed448 => SignaturePayload::PureEdDSA(signature),
+            KeyAlgorithm::Mldsa65 | KeyAlgorithm::Mldsa87 => SignaturePayload::PureMLDSA(signature),
+            _ => return Err(anyhow::anyhow!("Unknown key type requested!")),
         };
 
-        tracing::info!(digest_algorithm=%algorithm, digest=hex_hash, "Signature issued");
+        tracing::info!(digest_algorithm=%digest_algorithm, digest=hex_hash, "Signature issued");
         signatures.push(protocol::Signature {
             signature,
-            digest: algorithm,
+            digest: digest_algorithm,
             hash: hex_hash,
         });
     }
@@ -144,10 +322,58 @@ mod tests {
     use crate::server::crypto::test_utils::setup_hsm;
     use crate::server::crypto::token::import_pkcs11_token;
 
+    async fn verify_signature(
+        key_algorithm: KeyAlgorithm,
+        digest: DigestAlgorithm,
+        data: &[u8],
+        pubkey_pem: &str,
+        signature: &[u8],
+    ) -> anyhow::Result<()> {
+        let tempdir = tempfile::TempDir::new()?;
+        let data_path = tempdir.path().join("data");
+        tokio::fs::write(&data_path, data).await?;
+        let pubkey_path = tempdir.path().join("pubkey");
+        tokio::fs::write(&pubkey_path, pubkey_pem).await?;
+        let sig_path = tempdir.path().join("signature");
+        tokio::fs::write(&sig_path, signature).await?;
+
+        let mut verify_command = tokio::process::Command::new("openssl");
+        verify_command
+            .arg("pkeyutl")
+            .arg("-verify")
+            .arg("-rawin")
+            .arg("-in")
+            .arg(data_path)
+            .arg("-pubin")
+            .arg("-inkey")
+            .arg(pubkey_path)
+            .arg("-sigfile")
+            .arg(sig_path);
+        if matches!(
+            key_algorithm,
+            KeyAlgorithm::Rsa2K | KeyAlgorithm::Rsa4K | KeyAlgorithm::P256
+        ) {
+            verify_command.arg("-digest").arg(digest.to_string());
+        }
+        let debug_cli = format!("verify command: '{:?}'", verify_command);
+        let output = verify_command.output().await?;
+        assert!(
+            output.status.success(),
+            "{} failed:\nstdout: {}\nstderr: {}",
+            debug_cli,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let stdout = String::from_utf8(output.stdout)?;
+        assert_eq!("Signature Verified Successfully\n", stdout);
+
+        Ok(())
+    }
+
     #[test]
     fn encode_decode_digest_info() -> Result<()> {
         let algorithm = DigestAlgorithm::Sha256;
-        let hash = openssl::hash::hash(algorithm.into(), b"data")?;
+        let hash = openssl::hash::hash(openssl::hash::MessageDigest::sha256(), b"data")?;
         let encoded = encode_digest_info(algorithm, &hash)?;
         let (decoded_algorithm, decoded_hash) = decode_digest_info(&encoded)?;
 
@@ -308,15 +534,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sign_with_pkcs11_mldsa_keys_unsupported() -> Result<()> {
+        let hsm = setup_hsm()?;
+        let db_pool = db::pool("sqlite::memory:", false).await?;
+        db::migrate(&db_pool).await?;
+        let mut conn = db_pool.begin().await?;
+
+        let token = import_pkcs11_token(
+            &mut conn,
+            PathBuf::from("/usr/lib64/pkcs11/libkryoptic_pkcs11.so"),
+            None,
+            hsm.user_pin.clone(),
+        )
+        .await?;
+        let pkcs11 = token.intialize()?;
+        let slot = token.slot(&pkcs11)?;
+        let session = pkcs11.open_ro_session(slot)?;
+        session.login(cryptoki::session::UserType::User, Some(&hsm.user_pin))?;
+
+        let data = b"test data for PKCS11 ML-DSA signing";
+        let keys = db::Key::list(&mut conn).await?;
+        for key_algorithm in [KeyAlgorithm::Mldsa65, KeyAlgorithm::Mldsa87] {
+            let key = keys
+                .iter()
+                .find(|key| key.key_algorithm == key_algorithm)
+                .expect("Should have an ML-DSA key");
+
+            let pubkey = openssl::pkey::PKey::public_key_from_pem(key.public_key.as_bytes())?;
+            let mu = crate::calculate_mu(&pubkey, data)?;
+            let hex_hash = hex::encode(mu);
+
+            // Once PKCS#11 3.3 happens we should be able to support this and replace the assertion with:
+            //
+            // let signature = signatures.first().unwrap().signature.as_ref();
+            // verify_signature(key_algorithm, DigestAlgorithm::MldsaMu, data, &key.public_key, signature).await?;
+            let not_yet_supported = super::sign_with_pkcs11(
+                key,
+                &session,
+                vec![(DigestAlgorithm::MldsaMu, hex_hash.clone())],
+            )
+            .unwrap_err();
+            assert_eq!(
+                not_yet_supported.to_string(),
+                "PKCS#11 version 3.2 does not support signing Mu values"
+            );
+        }
+        pkcs11.finalize()?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn sign_with_softkey_rsa() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let user_password = Password::from("test-key-password");
 
         let key_algorithm = KeyAlgorithm::Rsa4K;
-        let encrypted_key = crypto::create_encrypted_key(
+        let (encrypted_key, _) = crypto::create_encrypted_key(
             &crate::server::Config::default(),
             user_password.clone(),
             key_algorithm,
+            None,
             Default::default(),
             Default::default(),
         )?;
@@ -389,10 +667,11 @@ mod tests {
         let user_password = Password::from("test-key-password");
 
         let key_algorithm = KeyAlgorithm::P256;
-        let encrypted_key = crypto::create_encrypted_key(
+        let (encrypted_key, _) = crypto::create_encrypted_key(
             &crate::server::Config::default(),
             user_password.clone(),
             key_algorithm,
+            None,
             Default::default(),
             Default::default(),
         )?;
@@ -454,6 +733,47 @@ mod tests {
             "OpenSSL CLI verification failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sign_with_softkey_mldsa_keys() -> Result<()> {
+        let data = b"test data for softkey ML-DSA signing";
+
+        for key_algorithm in [KeyAlgorithm::Mldsa65, KeyAlgorithm::Mldsa87] {
+            let pkey = crypto::create_key(key_algorithm)?;
+            let key = db::Key {
+                id: 1,
+                hybrid_pair_id: None,
+                name: "test-mldsa-softkey".to_string(),
+                key_algorithm,
+                handle: "test-handle".to_string(),
+                key_material: Some("test-key-material".to_string()),
+                public_key: String::from_utf8(pkey.public_key_to_pem()?)?,
+                pkcs11_token_id: None,
+                pkcs11_key_id: None,
+            };
+
+            let pubkey = openssl::pkey::PKey::public_key_from_pem(key.public_key.as_bytes())?;
+            let mu_digest = crate::calculate_mu(&pubkey, data)?;
+            let hex_hash = hex::encode(mu_digest);
+
+            let signatures = super::sign_with_softkey(
+                &key,
+                &pkey,
+                vec![(DigestAlgorithm::MldsaMu, hex_hash.clone())],
+            )?;
+            let signature = signatures.first().unwrap().signature.as_ref();
+            verify_signature(
+                key_algorithm,
+                DigestAlgorithm::MldsaMu,
+                data,
+                &key.public_key,
+                signature,
+            )
+            .await?;
+        }
 
         Ok(())
     }

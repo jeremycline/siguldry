@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
-This release contains a modest set of breaking changes, all of which are server admin (particularly
+This release contains a modest set of breaking changes, most of which are server admin (particularly
 key creation) related. In short, to migrate:
 
 - Remove the `openpgp_user_id` key from the Siguldry server configuration file; this is
@@ -19,6 +19,9 @@ key creation) related. In short, to migrate:
 
 - Adjust any scripts using the `siguldry-server` CLI to create keys for the changed
   flag names.
+
+Also, be aware that older clients cannot use the Ed25519 or ML-DSA signing keys without being
+updated.
 
 ### Fixed
 
@@ -49,9 +52,14 @@ key creation) related. In short, to migrate:
   User IDs are now provided when creating the OpenPGP certificate, making it easier to
   use different user IDs for each key.
 
+- **BREAKING CHANGE** The key algorithm names specified in `siguldry-server manage key create`
+  no longer include a dash in some cases. For example, `rsa4-k` is now `rsa4k`.
+
 - **BREAKING CHANGE** It's no longer possible to create CA-signed X.509 certificates during key
   creation.  This can still be done using the `siguldry-server manage key x509` command after key
   creation.
+
+- The minimum supported version of OpenSSL is now 3.5.
 
 
 ## [0.8.0] - 2026-07-09

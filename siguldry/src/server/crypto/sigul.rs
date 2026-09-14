@@ -41,7 +41,7 @@ pub fn encrypt_key(
     key_password: Password,
     private_key: PKey<Private>,
 ) -> anyhow::Result<String> {
-    let private_key_pem = super::encrypt_key(key_password, private_key)?;
+    let private_key_pem = super::encrypt_key(key_password, &private_key)?;
     bind_with_pkcs11(&config.pkcs11_bindings, &private_key_pem)
 }
 
