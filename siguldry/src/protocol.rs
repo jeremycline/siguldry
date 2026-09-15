@@ -645,6 +645,17 @@ impl KeyAlgorithm {
             KeyAlgorithm::Mldsa87 => "mldsa87",
         }
     }
+
+    /// Return the algorithm's valid hybrid pair based on RFC 9980.
+    pub const fn openpgp_hybrid_pair_algorithm(&self) -> Option<Self> {
+        match self {
+            KeyAlgorithm::Ed25519 => Some(KeyAlgorithm::Mldsa65),
+            KeyAlgorithm::Ed448 => Some(KeyAlgorithm::Mldsa87),
+            KeyAlgorithm::Mldsa65 => Some(KeyAlgorithm::Ed25519),
+            KeyAlgorithm::Mldsa87 => Some(KeyAlgorithm::Ed448),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for KeyAlgorithm {

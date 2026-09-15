@@ -143,12 +143,13 @@ pub mod keys {
     pub const PGP_EC_KEY_PASSWORD: &str = "🐉🐉🐉🐉🐉";
     pub const PGP_EC_KEY_EMAIL: &str = "Test Signing <sign@example.com>";
 
-    pub const PGP_MLDSA65_HYBRID_KEY_NAME: &str = "test-pgp-mldsa65-part-key";
-    pub const PGP_ED25519_HYBRID_KEY_NAME: &str = "test-pgp-ed25519-part-key";
+    pub const PGP_MLDSA65_HYBRID_KEY_NAME: &str = "test-pgp-mldsa65";
+    pub const PGP_ED25519_HYBRID_KEY_NAME: &str = "test-pgp-mldsa65-ed25519";
     pub const PGP_MLDSA65_ED25519_KEY_PASSWORD: &str = "🍩🍩🍩🍩🍩🍩";
     pub const PGP_MLDSA65_ED25519_KEY_EMAIL: &str = "hybrid key <mldsa65+ed25519@example.com>";
 
-    pub const PGP_MLDSA87_ED448_KEY_NAME: &str = "test-pgp-mldsa87-key";
+    pub const PGP_MLDSA87_HYBRID_KEY_NAME: &str = "test-pgp-mldsa87";
+    pub const PGP_ED448_HYBRID_KEY_NAME: &str = "test-pgp-mldsa87-ed448";
     pub const PGP_MLDSA87_ED448_KEY_PASSWORD: &str = "🍙🍙🍙🍙";
     pub const PGP_MLDSA87_ED448_KEY_EMAIL: &str = "hybrid key <mldsa87+ed448@example.com>";
 
@@ -643,50 +644,20 @@ impl InstanceBuilder {
                         "create",
                         "--algorithm",
                         "mldsa65",
+                        "--openpgp-hybrid-pair",
                         "siguldry-client",
                         keys::PGP_MLDSA65_HYBRID_KEY_NAME,
                     ],
                     Some(&format!("{}\n", keys::PGP_MLDSA65_ED25519_KEY_PASSWORD)),
-                )?;
-                Self::run_server_command(
-                    &server_bin,
-                    &server_config_file,
-                    &[
-                        "manage",
-                        "key",
-                        "create",
-                        "--algorithm",
-                        "ed25519",
-                        "siguldry-client",
-                        keys::PGP_ED25519_HYBRID_KEY_NAME,
-                    ],
-                    Some(&format!("{}\n", keys::PGP_MLDSA65_ED25519_KEY_PASSWORD)),
-                )?;
-                Self::run_server_command(
-                    &server_bin,
-                    &server_config_file,
-                    &[
-                        "manage",
-                        "key",
-                        "associate-hybrid",
-                        keys::PGP_ED25519_HYBRID_KEY_NAME,
-                        keys::PGP_MLDSA65_HYBRID_KEY_NAME,
-                    ],
-                    None,
                 )?;
                 let stdin = if self.with_pkcs11_binding {
                     format!(
-                        "{}\n{}\n{}\n",
+                        "{}\n{}\n",
                         keys::HSM_PIN,
                         keys::PGP_MLDSA65_ED25519_KEY_PASSWORD,
-                        keys::PGP_MLDSA65_ED25519_KEY_PASSWORD
                     )
                 } else {
-                    format!(
-                        "{}\n{}\n",
-                        keys::PGP_MLDSA65_ED25519_KEY_PASSWORD,
-                        keys::PGP_MLDSA65_ED25519_KEY_PASSWORD
-                    )
+                    format!("{}\n", keys::PGP_MLDSA65_ED25519_KEY_PASSWORD,)
                 };
                 Self::run_server_command(
                     &server_bin,
@@ -711,6 +682,35 @@ impl InstanceBuilder {
                 maybe_auto_unlock.push((
                     keys::PGP_ED25519_HYBRID_KEY_NAME,
                     keys::PGP_MLDSA65_ED25519_KEY_PASSWORD,
+                ));
+            }
+
+            if self.with_pgp_mldsa87_hybrid {
+                Self::run_server_command(
+                    &server_bin,
+                    &server_config_file,
+                    &[
+                        "manage",
+                        "key",
+                        "create",
+                        "--algorithm",
+                        "mldsa87",
+                        "--openpgp-hybrid-pair",
+                        "--openpgp-cert-name=openpgp-cert",
+                        "--openpgp-profile=rfc9580",
+                        format!("--openpgp-user-id={}", keys::PGP_MLDSA87_ED448_KEY_EMAIL).as_str(),
+                        "siguldry-client",
+                        keys::PGP_MLDSA87_HYBRID_KEY_NAME,
+                    ],
+                    Some(&format!("{}\n", keys::PGP_MLDSA87_ED448_KEY_PASSWORD)),
+                )?;
+                maybe_auto_unlock.push((
+                    keys::PGP_MLDSA87_HYBRID_KEY_NAME,
+                    keys::PGP_MLDSA87_ED448_KEY_PASSWORD,
+                ));
+                maybe_auto_unlock.push((
+                    keys::PGP_ED448_HYBRID_KEY_NAME,
+                    keys::PGP_MLDSA87_ED448_KEY_PASSWORD,
                 ));
             }
 

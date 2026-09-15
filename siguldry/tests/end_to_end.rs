@@ -221,7 +221,7 @@ async fn list_keys() -> anyhow::Result<()> {
     let instance = InstanceBuilder::new().with_all_keys().build().await?;
 
     let keys = instance.client.list_keys().await?;
-    assert_eq!(10, keys.len());
+    assert_eq!(12, keys.len());
 
     instance.halt().await?;
     Ok(())
@@ -239,7 +239,7 @@ async fn client_proxy_list_keys() -> anyhow::Result<()> {
     let mut client_proxy = ProxyClient::new(instance.client_proxy_socket())?;
 
     let keys = tokio::task::spawn_blocking(move || client_proxy.list_keys()).await??;
-    assert_eq!(10, keys.len());
+    assert_eq!(12, keys.len());
 
     instance.halt().await?;
     Ok(())

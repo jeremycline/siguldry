@@ -322,6 +322,25 @@ pub enum KeyCommands {
         #[arg(short, long, value_enum, default_value_t, ignore_case = true)]
         algorithm: KeyAlgorithm,
 
+        /// Create a hybrid key pair that meets the requirements for Sequoia OpenPGP.
+        ///
+        /// OpenPGP hybrid key pairs are actually two separate keys with several special
+        /// requirements.  Keys using ML-DSA-65 must be paired with an Ed25519 key, and keys using
+        /// ML-DSA-87 must be paired with an Ed448 key. Additionally, OpenPGP tooling exposed these
+        /// two keys as a single key to users, so the tooling expects the keys to use the same
+        /// password to access them.
+        ///
+        /// When this flag is passed, two keys are created with the same password, and the other
+        /// key's name is the same as this key's name with the algorithm as a suffix. Other
+        /// management commands like issuing OpenPGP certificates and granting or removing user
+        /// access take into account that it's part of a hybrid pair and will operate on both keys,
+        /// and either key can be referenced in those commands.
+        ///
+        /// As an example, if the key name provided is "my-signing-key" and the algorithm is
+        /// ML-DSA-87, a second key will be created named "my-signing-key-ed448".
+        #[arg(long)]
+        openpgp_hybrid_pair: bool,
+
         /// A file containing the password needed to unlock and use the key.
         ///
         /// The file should include the password on the first line and the file should include a newline.
@@ -342,21 +361,6 @@ pub enum KeyCommands {
 
         #[command(flatten)]
         openpgp_options: OpenPgpOptions,
-    },
-
-    /// Associate two keys as a hybrid key pair.
-    ///
-    /// For hybrid signature schemes that include a "traditional" and "post-quantum" signature,
-    /// two key pairs are associated with each other.
-    ///
-    /// Not all keys can be associated with each other:
-    ///
-    /// - Keys must not already be part of a hybrid pair
-    /// - ML-DSA-65 keys can only be paired with Ed25519 keys
-    /// - ML-DSA-87 keys can only be paired with Ed448 keys
-    AssociateHybrid {
-        first_key_name: String,
-        second_key_name: String,
     },
 
     /// Create an x509 certificates for a key.
@@ -429,15 +433,6 @@ pub enum KeyCommands {
         #[arg(long, default_value = None)]
         password_file: Option<PathBuf>,
 
-        /// A file containing the password needed to unlock and use the key's hybrid pair.
-        ///
-        /// If the key is not part of a hybrid pair, this argument is ignored.
-        ///
-        /// The file should include the password on the first line and the file should include a newline.
-        /// If this option is not provided, input is read from stdin.
-        #[arg(long, default_value = None)]
-        hybrid_password_file: Option<PathBuf>,
-
         /// A file containing the PIN for the PKCS#11 token used in binding (if any).
         ///
         /// The file should include the PIN on the first line and the file should include a newline.
@@ -482,6 +477,9 @@ pub enum UserCommands {
     /// 1. PKCS#11 PIN (if needed).
     /// 2. Existing user's access password.
     /// 3. New user's password.
+    ///
+    /// Note: if the key was created with "--openpgp-hybrid-pair", granting access to either key
+    /// in the pair grants the user access to both keys.
     GrantKeyAccess {
         /// A file containing the PIN for the PKCS#11 token used in binding (if any).
         ///
@@ -512,6 +510,9 @@ pub enum UserCommands {
     },
 
     /// Remove a user's access to a key.
+    ///
+    /// Note: if the key was created with "--openpgp-hybrid-pair", removing access to either key
+    /// in the pair removes the user's access to both keys.
     RevokeKeyAccess {
         /// The name of the key to revoke access from.
         key: String,

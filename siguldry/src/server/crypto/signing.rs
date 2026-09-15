@@ -475,10 +475,11 @@ mod tests {
         let user_password = Password::from("test-key-password");
 
         let key_algorithm = KeyAlgorithm::Rsa4K;
-        let encrypted_key = crypto::create_encrypted_key(
+        let (encrypted_key, _) = crypto::create_encrypted_key(
             &crate::server::Config::default(),
             user_password.clone(),
             key_algorithm,
+            None,
             Default::default(),
             Default::default(),
         )?;
@@ -551,10 +552,11 @@ mod tests {
         let user_password = Password::from("test-key-password");
 
         let key_algorithm = KeyAlgorithm::P256;
-        let encrypted_key = crypto::create_encrypted_key(
+        let (encrypted_key, _) = crypto::create_encrypted_key(
             &crate::server::Config::default(),
             user_password.clone(),
             key_algorithm,
+            None,
             Default::default(),
             Default::default(),
         )?;

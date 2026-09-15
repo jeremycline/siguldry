@@ -80,15 +80,7 @@ pub struct OpenPgpCertificateParameters {
     pub validity_days: u32,
 }
 
-/// Generate an encrypted "soft" key pair.
-pub fn create_encrypted_key(
-    config: &crate::server::Config,
-    user_password: Password,
-    algorithm: KeyAlgorithm,
-    x509_options: Option<X509CertificateParameters>,
-    openpgp_options: Option<OpenPgpCertificateParameters>,
-) -> anyhow::Result<EncryptedKey> {
-    let key_password = generate_password()?;
+fn create_key(algorithm: KeyAlgorithm) -> anyhow::Result<PKey<Private>> {
     let key = match algorithm {
         KeyAlgorithm::Rsa2K => PKey::from_rsa(Rsa::generate(2048)?)?,
         KeyAlgorithm::Rsa4K => PKey::from_rsa(Rsa::generate(4096)?)?,
@@ -108,11 +100,28 @@ pub fn create_encrypted_key(
             PKey::private_key_from_seed(None, openssl::pkey::KeyType::ML_DSA_87, None, &seed)?
         }
     };
-    let public_key_pem = String::from_utf8(key.public_key_to_pem()?)?;
-    let handle = hex::encode_upper(openssl::hash::hash(
-        openssl::hash::MessageDigest::sha256(),
-        &key.public_key_to_der()?,
-    )?);
+
+    Ok(key)
+}
+
+/// Generate an encrypted "soft" key pair.
+pub fn create_encrypted_key(
+    config: &crate::server::Config,
+    user_password: Password,
+    algorithm: KeyAlgorithm,
+    hybrid_algorithm: Option<KeyAlgorithm>,
+    x509_options: Option<X509CertificateParameters>,
+    openpgp_options: Option<OpenPgpCertificateParameters>,
+) -> anyhow::Result<(EncryptedKey, Option<EncryptedKey>)> {
+    if hybrid_algorithm.is_some() && x509_options.is_some() {
+        return Err(anyhow::anyhow!(
+            "Hybrid keys don't support generating X.509 certificates during key creation"
+        ));
+    }
+
+    let key = create_key(algorithm)?;
+    let hybrid_key = hybrid_algorithm.map(create_key).transpose()?;
+
     let x509_certificate = x509_options
         .map(|parameters| {
             x509_certificate_for_key_private(
@@ -130,27 +139,64 @@ pub fn create_encrypted_key(
         .map(|parameters| {
             openpgp_cert_for_key_private(
                 &key,
-                None,
-                parameters.user_id,
+                hybrid_key.as_ref(),
+                parameters.user_id.clone(),
                 parameters.profile,
                 parameters.hash_algorithm,
                 parameters.validity_days,
             )
         })
         .transpose()?;
+
+    let hybrid_key = hybrid_key
+        .map(|key| {
+            let public_key_pem = String::from_utf8(key.public_key_to_pem()?)?;
+            let handle = hex::encode_upper(openssl::hash::hash(
+                openssl::hash::MessageDigest::sha256(),
+                &key.public_key_to_der()?,
+            )?);
+            let key_password = generate_password()?;
+            let private_key_pem = encrypt_key(key_password.clone(), key)?;
+            let key_material =
+                binding::bind_with_pkcs11(&config.pkcs11_bindings, &private_key_pem)?;
+            let encrypted_password = binding::encrypt_key_password(
+                &config.pkcs11_bindings,
+                user_password.clone(),
+                key_password,
+            )?;
+            Ok::<_, anyhow::Error>(EncryptedKey {
+                handle,
+                encrypted_password,
+                key_material,
+                public_key_pem,
+                openpgp_certificate: openpgp_certificate.clone(),
+                x509_certificate: x509_certificate.clone(),
+            })
+        })
+        .transpose()?;
+
+    let public_key_pem = String::from_utf8(key.public_key_to_pem()?)?;
+    let handle = hex::encode_upper(openssl::hash::hash(
+        openssl::hash::MessageDigest::sha256(),
+        &key.public_key_to_der()?,
+    )?);
+    let key_password = generate_password()?;
     let private_key_pem = encrypt_key(key_password.clone(), key)?;
     let key_material = binding::bind_with_pkcs11(&config.pkcs11_bindings, &private_key_pem)?;
     let encrypted_password =
         binding::encrypt_key_password(&config.pkcs11_bindings, user_password, key_password)?;
 
-    Ok(EncryptedKey {
-        handle,
-        encrypted_password,
-        key_material,
-        public_key_pem,
-        openpgp_certificate,
-        x509_certificate,
-    })
+    Ok((
+        EncryptedKey {
+            handle,
+            encrypted_password,
+            key_material,
+            public_key_pem,
+            openpgp_certificate,
+            x509_certificate,
+        },
+        hybrid_key,
+    ))
 }
 
 fn openssl_keys_to_openpgp(
@@ -585,7 +631,17 @@ fn x509_certificate_for_key_private<P: HasPublic, S: HasPrivate>(
     let subj_key_id = x509::extension::SubjectKeyIdentifier::new();
     let context = builder.x509v3_context(issuer.as_ref().map(|i| i.as_ref()), None);
     builder.append_extension(subj_key_id.build(&context)?)?;
-    builder.sign(signing_key, openssl::hash::MessageDigest::sha512())?;
+    // The digest is not selectable for these.
+    let digest = if signing_key.is_a(OpenSSLKeyType::ED25519)
+        || signing_key.is_a(OpenSSLKeyType::ED448)
+        || signing_key.is_a(OpenSSLKeyType::ML_DSA_65)
+        || signing_key.is_a(OpenSSLKeyType::ML_DSA_87)
+    {
+        openssl::hash::MessageDigest::null()
+    } else {
+        openssl::hash::MessageDigest::sha512()
+    };
+    builder.sign(signing_key, digest)?;
     let certificate = String::from_utf8(builder.build().to_pem()?)?;
 
     Ok(certificate)
