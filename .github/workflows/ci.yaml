@@ -14,7 +14,7 @@ on:
 jobs:
   audit:
     name: Cargo dependency checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
         with:
@@ -39,7 +39,7 @@ jobs:
 
   zizmor:
     name: GitHub Actions lints
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       security-events: write
       contents: read
@@ -60,7 +60,7 @@ jobs:
 
   style:
     name: Code style checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     container:
       image: quay.io/fedora/fedora:44
     steps:
@@ -103,7 +103,7 @@ jobs:
 
   generate-sigul-data:
     name: Generate a Sigul data directory for migration
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # 7.0.0
         with:
@@ -141,7 +141,7 @@ jobs:
   test:
     name: Unit tests
     needs: generate-sigul-data
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     container:
       image: quay.io/fedora/fedora:44
     strategy:
@@ -207,7 +207,7 @@ jobs:
 
   legacy-integration-tests:
     name: Sigul integration tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     container: quay.io/jeremycline/sigul-pesign-bridge-ci:2026-07-06
     services:
       sigul-bridge:
