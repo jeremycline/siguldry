@@ -53,7 +53,7 @@ impl PendingConnection {
                     match result {
                         Ok(0) => tracing::info!(?remote_addr, ?role, "Pending connection closed"),
                         Ok(_) => tracing::error!(?remote_addr, ?role, "Pending connection sent data before it was bridged"),
-                        Err(error) => tracing::info!(?error, ?remote_addr, ?role, "Pending connection disconnected"),
+                        Err(error) => tracing::info!(reason=?error, ?remote_addr, ?role, "Pending connection disconnected"),
                     }
                     None
                 }

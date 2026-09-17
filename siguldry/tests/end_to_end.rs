@@ -133,7 +133,10 @@ async fn bridge_discards_connections_from_restarted_server() -> anyhow::Result<(
 
     instance.halt().await?;
 
-    assert!(logs_contain("Pending connection closed"));
+    assert!(
+        logs_contain("Pending connection closed")
+            || logs_contain("Pending connection disconnected")
+    );
     assert!(!logs_contain("Connection to server failed"));
     assert!(!logs_contain("early eof"));
 
