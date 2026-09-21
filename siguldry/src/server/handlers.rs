@@ -92,7 +92,11 @@ impl Handler {
         conn: &mut SqliteConnection,
         key_name: String,
     ) -> Result<Response, ServerError> {
-        let key = db::Key::get(conn, &key_name).await?;
+        let key = db::Key::get_by_user(conn, &self.user, &key_name)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("User doesn't have access to a key with name '{key_name}'")
+            })?;
         let certificates = certs_for_key(conn, &key).await?;
         let hybrid_key_name = key.find_hybrid(conn).await?.map(|k| k.name);
         tracing::debug!("GetKey request successfully processed");

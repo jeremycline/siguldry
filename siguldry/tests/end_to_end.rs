@@ -14,6 +14,7 @@ use siguldry::{
 };
 
 use siguldry_test::{InstanceBuilder, create_credentials, keys};
+use tempfile::TempDir;
 
 // If the bridge presents a certificate signed by a different CA, the client should reject it.
 #[tokio::test]
@@ -1041,7 +1042,16 @@ async fn import_sigul_just_a_user() -> anyhow::Result<()> {
 #[tokio::test]
 #[tracing_test::traced_test]
 async fn import_sigul_certificate_names_match() -> anyhow::Result<()> {
+    let tempdir = TempDir::new()?;
+    let creds = create_credentials(
+        tempdir.path(),
+        "localhost",
+        "siguldry-server",
+        &["sigul-client"],
+    )
+    .await?;
     let instance = InstanceBuilder::new()
+        .with_creds(creds)
         .with_sigul_import(None)
         .build()
         .await?;

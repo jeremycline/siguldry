@@ -358,6 +358,25 @@ impl Key {
             .await
     }
 
+    /// Get a key by name, but only if the user has access.
+    #[instrument(skip(conn))]
+    pub async fn get_by_user(
+        conn: &mut SqliteConnection,
+        user: &User,
+        key_name: &str,
+    ) -> Result<Option<Key>, sqlx::Error> {
+        sqlx::query_as!(
+            Key,
+            "SELECT keys.* FROM keys
+            INNER JOIN key_accesses ON keys.id = key_accesses.key_id
+            WHERE keys.name = $1 AND key_accesses.user_id = $2;",
+            key_name,
+            user.id,
+        )
+        .fetch_optional(&mut *conn)
+        .await
+    }
+
     /// List all keys a user has access to.
     #[instrument(skip(conn))]
     pub async fn list_by_user(
