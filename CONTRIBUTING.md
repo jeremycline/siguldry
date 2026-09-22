@@ -21,6 +21,7 @@ test suite. This is expected to run on Fedora or RHEL, although it should work e
 dnf install -y \
   clang \
   kryoptic \
+  nss-tools \
   opensc \
   openssl \
   openssl-devel \
@@ -28,8 +29,18 @@ dnf install -y \
   pkcs11-provider \
   pkg-config \
   python3-devel \
+  sbsigntools \
   sequoia-sq \
   sqlite-devel
+```
+
+The Secure Boot signing test uses the sample UEFI application. With a rustup-managed
+toolchain, build it and the host binaries before running the tests:
+
+```bash
+rustup target add x86_64-unknown-uefi
+cargo build --target x86_64-unknown-uefi -p sample-uefi
+cargo build --workspace
 ```
 
 If you want to run the full test suite including the tests for migrating a Sigul database

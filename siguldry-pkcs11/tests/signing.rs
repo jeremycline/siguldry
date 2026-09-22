@@ -12,6 +12,7 @@ use cryptoki::{
 
 use siguldry::protocol::{DigestAlgorithm, KeyAlgorithm};
 use siguldry_test::{InstanceBuilder, keys};
+use tokio::io::AsyncWriteExt;
 
 mod common;
 use common::{initialize_module, module_path, raw_ecdsa_to_der};
@@ -902,5 +903,135 @@ async fn sign_protected_authentication_path() -> anyhow::Result<()> {
     let stdout = String::from_utf8(output.stdout)?;
     assert_eq!("Verified OK\n", stdout);
 
+    Ok(())
+}
+
+// Test the signing path used in, for example, Fedora's kernel build.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn pesign_secure_boot_protected_auth() -> anyhow::Result<()> {
+    let instance = InstanceBuilder::new()
+        .with_hsm_rsa_key()
+        .auto_unlock_keys()
+        .with_client_proxy()
+        .build()
+        .await?;
+    let in_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../target/x86_64-unknown-uefi/debug/sample-uefi.efi");
+    let out_file = instance.state_dir.path().join("sample-uefi.signed.efi");
+    let key = instance
+        .client
+        .get_key(keys::HSM_RSA_KEY_NAME.to_string())
+        .await?;
+    let certificate = key
+        .x509_certificates()
+        .first()
+        .cloned()
+        .expect("Missing x509 certificate");
+    let certificate_path = instance.state_dir.path().join("codesigning.pem");
+    tokio::fs::write(&certificate_path, certificate.certificate.as_bytes()).await?;
+
+    // Setup NSS with the PKCS#11 module
+    let nss_dir = instance.state_dir.path().join("nssdb");
+    tokio::fs::create_dir(&nss_dir).await?;
+    let output = tokio::process::Command::new("modutil")
+        .arg("-create")
+        .arg("-dbdir")
+        .arg(&nss_dir)
+        .arg("-force")
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "'modutil -create -dbdir {} -force' failed:\nstdout: {}\nstderr: {}",
+        nss_dir.display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let proxy_path = instance.client_proxy_socket();
+    let output = tokio::process::Command::new("modutil")
+        .env("LIBSIGULDRY_PKCS11_PROXY_PATH", &proxy_path)
+        .arg("-dbdir")
+        .arg(&nss_dir)
+        .arg("-add")
+        .arg("siguldry")
+        .arg("-libfile")
+        .arg(module_path())
+        .arg("-force")
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "'modutil -dbdir {} -add siguldry -libfile {}' failed:\nstdout: {}\nstderr: {}",
+        nss_dir.display(),
+        module_path().display(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let mut pesign = tokio::process::Command::new("pesign")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .env("LIBSIGULDRY_PKCS11_LOG", "info")
+        .env("LIBSIGULDRY_PKCS11_PROXY_PATH", &proxy_path)
+        .arg("--certdir")
+        .arg(&nss_dir)
+        .arg("--token")
+        .arg(keys::HSM_RSA_KEY_NAME)
+        .arg("--certificate")
+        .arg(keys::HSM_RSA_KEY_NAME)
+        .arg("--sign")
+        .arg("--in")
+        .arg(&in_file)
+        .arg("--out")
+        .arg(&out_file)
+        .spawn()?;
+    pesign
+        .stdin
+        .take()
+        .expect("Missing pesign stdin")
+        .write_all(b"this-isn't-the-password-and-it-doesn't-matter-what-it-is\n")
+        .await?;
+    let output = pesign.wait_with_output().await?;
+    assert!(
+        output.status.success(),
+        "pesign --sign failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Protected authentication path succeeded"),
+        "pesign did not use protected authentication:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let output = tokio::process::Command::new("sbverify")
+        .arg("--cert")
+        .arg(&certificate_path)
+        .arg(&out_file)
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "sbverify signed application failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let output = tokio::process::Command::new("sbverify")
+        .arg("--cert")
+        .arg(&certificate_path)
+        .arg(&in_file)
+        .output()
+        .await?;
+    assert!(
+        !output.status.success(),
+        "sbverify unexpectedly verified the unsigned application:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    instance.halt().await?;
     Ok(())
 }

@@ -9,6 +9,7 @@ use std::{
     io::Write,
     net::SocketAddr,
     num::{NonZeroU16, NonZeroU64},
+    os::fd::OwnedFd,
     path::{Path, PathBuf},
     process::Stdio,
     str::FromStr,
@@ -723,7 +724,7 @@ impl InstanceBuilder {
 
             if let Some((pkcs11, slot, user_pin)) = pkcs11 {
                 if self.with_hsm_rsa_key {
-                    Self::create_hsm_rsa_key(&pkcs11, slot, &user_pin)?;
+                    Self::create_hsm_rsa_key(&pkcs11, slot, &user_pin, tempdir.path()).await?;
                     maybe_auto_unlock.push((keys::HSM_RSA_KEY_NAME, keys::HSM_ACCESS_PASSWORD));
                 }
                 if self.with_hsm_ec_key {
@@ -862,6 +863,7 @@ impl InstanceBuilder {
             let listener = UnixListener::bind(&server_config.signer_socket_path)?;
 
             let signer_halt = halt_token.clone();
+            let signer_bin = server_bin.with_file_name("siguldry-signer");
 
             let signer = tokio::spawn(async move {
                 loop {
@@ -875,9 +877,28 @@ impl InstanceBuilder {
                         }
                     };
                     tracing::info!("signing helper accepted connection");
-                    let (reader, writer) = tokio::io::split(stream);
-                    let conn_halt = signer_halt.clone();
-                    siguldry::server::ipc::serve(conn_halt, reader, writer).await?;
+
+                    // Poorly re-implement systemd's socket activation for the signer helper.
+                    let stream = stream.into_std()?;
+                    stream.set_nonblocking(false)?;
+                    let stdin: OwnedFd = stream.try_clone()?.into();
+                    let stdout: OwnedFd = stream.into();
+                    let mut signer = Command::new(&signer_bin)
+                        .stdin(Stdio::from(stdin))
+                        .stdout(Stdio::from(stdout))
+                        .kill_on_drop(true)
+                        .spawn()?;
+                    tokio::select! {
+                        _ = signer_halt.cancelled() => {
+                            signer.kill().await?;
+                            return Ok(());
+                        }
+                        status = signer.wait() => {
+                            if !status?.success() {
+                                return Err(anyhow::anyhow!("Signing helper failed"))
+                            }
+                        }
+                    }
                 }
             });
             (halt_token, signer)
@@ -1026,7 +1047,12 @@ impl InstanceBuilder {
         Ok(())
     }
 
-    fn create_hsm_rsa_key(pkcs11: &Pkcs11, slot: Slot, user_pin: &AuthPin) -> anyhow::Result<()> {
+    async fn create_hsm_rsa_key(
+        pkcs11: &Pkcs11,
+        slot: Slot,
+        user_pin: &AuthPin,
+        tempdir: &Path,
+    ) -> anyhow::Result<()> {
         let id = Attribute::Id(vec![1]);
         let label = Attribute::Label(keys::HSM_RSA_KEY_NAME.as_bytes().to_vec());
         let _ = pkcs11.open_rw_session(slot).and_then(|session| {
@@ -1053,6 +1079,51 @@ impl InstanceBuilder {
                 ],
             )
         })?;
+
+        let module_path = "/usr/lib64/pkcs11/libkryoptic_pkcs11.so";
+        let cert_file = tempdir.join("hsm-rsa-cert.pem");
+        let hsm_config_path = tempdir.join("kryoptic.toml");
+        let output = Command::new("openssl")
+            .env("KRYOPTIC_CONF", &hsm_config_path)
+            .env("PKCS11_PROVIDER_MODULE", module_path)
+            .args(["req", "-x509", "-provider", "pkcs11", "-sha256"])
+            .arg("-subj")
+            .arg(format!("/CN={}", keys::HSM_RSA_KEY_NAME))
+            .args(["-addext", "keyUsage=digitalSignature"])
+            .args(["-addext", "extendedKeyUsage=codeSigning"])
+            .arg("-passin")
+            .arg(format!("pass:{}", keys::HSM_PIN))
+            .args(["-key", "pkcs11:token=siguldry-test-token;type=private"])
+            .arg("-out")
+            .arg(&cert_file)
+            .output()
+            .await?;
+        assert!(
+            output.status.success(),
+            "Failed to create HSM code-signing certificate:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+
+        let output = Command::new("pkcs11-tool")
+            .env("KRYOPTIC_CONF", &hsm_config_path)
+            .arg(format!("--module={module_path}"))
+            .args([
+                "--login",
+                "--type=cert",
+                "--label=test-hsm-rsa-cert",
+                "--id=1",
+            ])
+            .arg(format!("--pin={}", keys::HSM_PIN))
+            .arg(format!("--write-object={}", cert_file.display()))
+            .output()
+            .await?;
+        assert!(
+            output.status.success(),
+            "Failed to add code-signing certificate to HSM:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
 
         Ok(())
     }
