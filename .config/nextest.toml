@@ -1,6 +1,7 @@
 [test-groups]
 # Sigul tests share a database and some need exclusive access to /var/run/pesign
 sigul = { max-threads = 1 }
+pkcs11provider10 = { max-threads = "num-cpus"}
 
 [profile.default]
 # These depend on the sigul server to be set up manually
@@ -16,6 +17,14 @@ global-timeout = "10m"
 slow-timeout = { period = "30s", terminate-after = 4 }
 # siguldry::client_v1 change_key_passphrase is flaky and seems like a server issue
 retries = { backoff = "fixed", count = 15, delay = "1s" }
+
+[profile.pkcs11provider10]
+# ML-DSA signatures via pkcs11-provider are not supported on RHEL 10.1 and 10.2
+# as it ships with pkcs11-provider 1.0 and ML-DSA got added in 1.1.
+default-filter = "not (binary(client_v1) | binary(pesign_client) | test(sign_mldsa65_openssl_provider) | test(sign_mldsa87_openssl_provider))"
+fail-fast = false
+global-timeout = "10m"
+slow-timeout = { period = "15s", terminate-after = 4 }
 
 [[profile.default.overrides]]
 filter = 'binary(client_v1) | binary(pesign_client)'

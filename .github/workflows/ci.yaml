@@ -262,7 +262,14 @@ jobs:
           echo "module: libsiguldry_pkcs11.so" > /usr/share/p11-kit/modules/siguldry.module
 
       - name: Run unit tests
-        run: cargo nextest run
+        run: |
+          pkcs11_provider_version=$(rpm -q --queryformat '%{VERSION}' pkcs11-provider)
+          version_comparison=$(rpm --eval "%{lua:print(rpm.vercmp('$pkcs11_provider_version', '1.1'))}")
+          if (( version_comparison < 0 )); then
+            cargo nextest --profile pkcs11provider10 run
+          else
+            cargo nextest run
+          fi
 
       - name: Check manual is up-to-date
         run: cargo xtask manual && test -z "$(git status --porcelain)"

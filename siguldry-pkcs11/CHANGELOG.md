@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-09-23
+
+### Added
+
+- The module now supports the CKM_ML_DSA mechanism and exposes ML-DSA-65 and ML-DSA-87 keys for
+  signing. The only supported mechanism is the pure ML-DSA signature; none of the pre-hash
+  mechanisms are supported at this time (#269)
+
+- The module now supports the CKM_EDDSA mechanism and exposes Ed25519 and Ed448 keys for signing.
+  At this time, the module only accepts inputs that are 32 or 64 bytes in length, which is not
+  compliant with the specification but does support signing with OpenPGP or anything else that
+  computes the signature on a raw digest (#269)
+
+
 ## [2.1.0] - 2026-05-15
 
 ### Added

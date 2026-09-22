@@ -1,6 +1,6 @@
 [package]
 name = "siguldry-pkcs11"
-version = "2.1.0"
+version = "2.2.0"
 rust-version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -41,7 +41,7 @@ version = "0.5"
 version = "0.4"
 
 [dependencies.openssl]
-version = "0.10"
+version = "0.10.81"
 
 [dependencies.sequoia-openpgp]
 version = "2"
@@ -57,7 +57,7 @@ version = "1"
 
 [dependencies.siguldry]
 path = "../siguldry"
-version = ">=0.6, <0.10"
+version = "0.9"
 default-features = false
 
 [dependencies.tokio]
