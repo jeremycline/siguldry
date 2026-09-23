@@ -5,17 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## [0.9.0] - 2026-09-23
 
-This release contains a modest set of breaking changes, most of which are server admin (particularly
-key creation) related. In short, to migrate:
+This release contains a modest set of breaking changes, most of which are
+server admin (particularly key creation) related. In short, to migrate:
 
 - Remove the `openpgp_user_id` key from the Siguldry server configuration file; this is
   now a command-line argument provided during OpenPGP certificate creation.
 
 - For simplicity, all X.509 certificates created during key creation are self-signed.
   Additional certificates signed by a Certificate Authority can be created with the
-  `key x509` sub-command.
+  `siguldry-server manage key x509` sub-command.
 
 - Adjust any scripts using the `siguldry-server` CLI to create keys for the changed
   flag names.
@@ -30,10 +30,30 @@ updated.
   would result in the client failing the first few requests while the stale connections
   were slowly drained (#250)
 
+- RSA key pairs in hardware security modules that do not provide the CKA_PUBLIC_KEY_INFO
+  attribute will now be importable if the CKA_MODULUS and CKA_PUBLIC_EXPONENT attributes
+  are provided - many thanks to Corentin Oparowski for this fix (#259)
+
 ### Added
 
-- There is now a `siguldry-server manage key openpgp` command to create OpenPGP certificates for a
-  key pair.
+- There is now a `siguldry-server manage key openpgp` command to create OpenPGP
+  certificates for a key pair.
+
+- The server can now be used to generate Ed25519 signing keys, as well as X.509
+  and OpenPGP (if the RFC9580 profile is used) certificates for those keys (#254)
+
+- The server can now be used to generate Ed448 signing keys, as well as X.509
+  and OpenPGP (if the RFC9580 profile is used) certificates for those keys (#254)
+
+- The server can now be used to generate ML-DSA-65 signing keys, as well as
+  X.509 certificates for those keys (#254)
+
+- The server can now be used to generate ML-DSA-87 signing keys, as well as
+  X.509 certificates for those keys (#254)
+
+- The server can now be used to generate ML-DSA-65+Ed25519 and ML-DSA-87+Ed448
+  hybrid key pairs and OpenPGP certificates for those associated pair of key
+  pairs (#254)
 
 ### Changed
 
