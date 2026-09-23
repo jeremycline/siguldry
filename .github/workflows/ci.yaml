@@ -157,8 +157,8 @@ jobs:
       - name: Upload sample UEFI application
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
         with:
-          name: sample-uefi
-          path: target/x86_64-unknown-uefi/debug/sample-uefi.efi
+          name: sample-uefi.efi
+          path: target/x86_64-unknown-uefi/debug/
           if-no-files-found: error
           overwrite: true
           retention-days: 30
@@ -190,18 +190,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Download sigul data artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
-        with:
-          name: sigul-data
-          path: devel/sigul-data/
-
-      - name: Download sample UEFI application
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
-        with:
-          name: sample-uefi
-          path: target/x86_64-unknown-uefi/debug/
-
       - name: Install system Rust toolchain
         if: matrix.rust-toolchain == 'system'
         run: dnf install -y rust cargo
@@ -212,6 +200,7 @@ jobs:
         with:
           toolchain: ${{matrix.rust-toolchain}}
           components: clippy, rustfmt
+
       - name: Install nextest
         uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # 2.86.7
         with:
@@ -220,6 +209,18 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # 2.9.2
         with:
           prefix-key: "${{ matrix.container-image }}"
+
+      - name: Download sigul data artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: sigul-data
+          path: devel/sigul-data/
+
+      - name: Download sample UEFI application
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: sample-uefi.efi
+          path: target/x86_64-unknown-uefi/debug/
 
       - name: Enable EPEL and CRB
         if: ${{ !startsWith(matrix.container-image, 'quay.io/fedora/') }}
