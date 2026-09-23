@@ -893,7 +893,7 @@ async fn mldsa65_signature() -> anyhow::Result<()> {
         .await?;
 
     let public_key = openssl::pkey::PKey::public_key_from_pem(key.public_key.as_bytes())?;
-    let mu_digest = siguldry::calculate_mu(public_key.as_ref(), data)?;
+    let mu_digest = siguldry::calculate_mu(&public_key, data, None)?;
     let digest = hex::encode(mu_digest);
 
     let signature = instance
@@ -960,7 +960,7 @@ async fn mldsa87_signature() -> anyhow::Result<()> {
         .await?;
 
     let public_key = openssl::pkey::PKey::public_key_from_pem(key.public_key.as_bytes())?;
-    let mu_digest = siguldry::calculate_mu(public_key.as_ref(), data)?;
+    let mu_digest = siguldry::calculate_mu(&public_key, data, None)?;
     let digest = hex::encode(mu_digest);
 
     let signature = instance

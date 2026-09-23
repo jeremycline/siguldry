@@ -561,7 +561,7 @@ mod tests {
                 .expect("Should have an ML-DSA key");
 
             let pubkey = openssl::pkey::PKey::public_key_from_pem(key.public_key.as_bytes())?;
-            let mu = crate::calculate_mu(&pubkey, data)?;
+            let mu = crate::calculate_mu(&pubkey, data, None)?;
             let hex_hash = hex::encode(mu);
 
             // Once PKCS#11 3.3 happens we should be able to support this and replace the assertion with:
@@ -756,7 +756,7 @@ mod tests {
             };
 
             let pubkey = openssl::pkey::PKey::public_key_from_pem(key.public_key.as_bytes())?;
-            let mu_digest = crate::calculate_mu(&pubkey, data)?;
+            let mu_digest = crate::calculate_mu(&pubkey, data, None)?;
             let hex_hash = hex::encode(mu_digest);
 
             let signatures = super::sign_with_softkey(

@@ -77,14 +77,13 @@ pub mod protocol;
 pub mod server;
 
 /// Calculate the mu value for ML-DSA signatures.
-///
-/// This function does not support a context at the moment.
 #[doc(hidden)]
-pub fn calculate_mu(
-    public_key: &openssl::pkey::PKeyRef<openssl::pkey::Public>,
+pub fn calculate_mu<'a, P: openssl::pkey::HasPublic + 'a>(
+    public_key: impl Into<&'a openssl::pkey::PKey<P>>,
     message: &[u8],
-) -> Result<[u8; 64], openssl::error::ErrorStack> {
-    let mut hasher = begin_mu(public_key)?;
+    context: Option<&[u8]>,
+) -> Result<[u8; 64], anyhow::Error> {
+    let mut hasher = begin_mu(public_key, context)?;
     hasher.update(message)?;
     let mut mu_digest = [0_u8; 64];
     hasher.finish_xof(&mut mu_digest)?;
@@ -101,23 +100,27 @@ pub fn calculate_mu(
 /// All that remains to calculate Mu is to update the hasher with the message and call
 /// `finish_xof()` with a 64 byte target buffer.
 #[doc(hidden)]
-pub fn begin_mu(
-    public_key: &openssl::pkey::PKeyRef<openssl::pkey::Public>,
-) -> Result<Hasher, openssl::error::ErrorStack> {
+pub fn begin_mu<'a, P: openssl::pkey::HasPublic + 'a>(
+    public_key: impl Into<&'a openssl::pkey::PKey<P>>,
+    context: Option<&[u8]>,
+) -> Result<Hasher, anyhow::Error> {
     // Prepare the hash object with the 64-byte SHAKE256 hash of the public key, a null byte,
     // the length of the context as a single byte, and then the context (maximum of 255 bytes).
     let mut pubkey_hash = [0_u8; 64];
     openssl::hash::hash_xof(
         MessageDigest::shake_256(),
-        public_key.raw_public_key()?.as_slice(),
+        public_key.into().raw_public_key()?.as_slice(),
         &mut pubkey_hash,
     )?;
     let mut hasher = Hasher::new(MessageDigest::shake_256())?;
     hasher.update(&pubkey_hash)?;
     hasher.update(&[0_u8])?;
 
-    // Context, not currently something we care about
-    hasher.update(&[0_u8])?;
+    let context = context.unwrap_or_default();
+    let context_len =
+        u8::try_from(context.len()).context("ML-DSA context must not exceed 255 bytes")?;
+    hasher.update(&[context_len])?;
+    hasher.update(context)?;
 
     Ok(hasher)
 }
@@ -285,4 +288,62 @@ pub fn listen_fds() -> Result<Vec<(Option<String>, OwnedFd)>, anyhow::Error> {
     }
 
     Ok(fds)
+}
+
+#[cfg(test)]
+mod tests {
+    use openssl::pkey::PKey;
+
+    use super::*;
+
+    #[test]
+    fn mu_includes_context() -> anyhow::Result<()> {
+        let mut seed = [0_u8; 32];
+        openssl::rand::rand_priv_bytes(&mut seed)?;
+        let private_key =
+            PKey::private_key_from_seed(None, openssl::pkey::KeyType::ML_DSA_65, None, &seed)?;
+        let message = b"beep boop";
+        let context = b"namespace this signature";
+
+        let actual = calculate_mu(&private_key, message, Some(context))?;
+        let actual_no_context = calculate_mu(&private_key, message, None)?;
+
+        assert_ne!(actual, actual_no_context);
+
+        let mut public_key_hash = [0_u8; 64];
+        openssl::hash::hash_xof(
+            MessageDigest::shake_256(),
+            private_key.raw_public_key()?.as_slice(),
+            &mut public_key_hash,
+        )?;
+        let mut expected_input = public_key_hash.to_vec();
+        expected_input.extend_from_slice(&[0, context.len() as u8]);
+        expected_input.extend_from_slice(context);
+        expected_input.extend_from_slice(message);
+        let mut expected = [0_u8; 64];
+        openssl::hash::hash_xof(MessageDigest::shake_256(), &expected_input, &mut expected)?;
+
+        assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn mu_context_is_limited_to_255_bytes() -> anyhow::Result<()> {
+        let mut seed = [0_u8; 32];
+        openssl::rand::rand_priv_bytes(&mut seed)?;
+        let private_key =
+            PKey::private_key_from_seed(None, openssl::pkey::KeyType::ML_DSA_65, None, &seed)?;
+        let public_key = PKey::public_key_from_pem(&private_key.public_key_to_pem()?)?;
+
+        begin_mu(&private_key, Some(&[0_u8; 255]))?;
+        let error = begin_mu(&public_key, Some(&[0_u8; 256]))
+            .err()
+            .expect("a 256-byte context should be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "ML-DSA context must not exceed 255 bytes"
+        );
+        Ok(())
+    }
 }
