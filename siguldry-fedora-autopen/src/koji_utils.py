@@ -117,8 +117,8 @@ class Client:
         """
         self.hub_url = hub_url
         self.principal = principal
-        self.keytab = keytab
-        self.ccache = ccache
+        self.keytab = str(keytab) if keytab is not None else None
+        self.ccache = str(ccache) if ccache is not None else None
         self.readonly = readonly
 
         split_url = urlsplit(self.hub_url)
