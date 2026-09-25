@@ -1,5 +1,9 @@
 [Unit]
 Description=Siguldry client shared proxy
+# By default systemd allows the service to be started without the socket, but
+# it's our responsibility to listen on the socket in that scenario. We don't
+# so we need to require the socket unit to opt out of that behaviour.
+Requires=siguldry-client-shared-proxy.socket
 After=siguldry-client-shared-proxy.socket
 CollectMode=inactive-or-failed
 
