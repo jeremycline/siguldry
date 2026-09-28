@@ -13,7 +13,7 @@ use std::{
 use anyhow::Context;
 use pyo3::{
     Bound, FromPyObject, Py, Python,
-    types::{PyAny, PyAnyMethods, PyIterator, PyModule},
+    types::{PyAny, PyAnyMethods, PyIterator, PyModule, PyTracebackMethods},
 };
 use tokio::sync::{mpsc, oneshot};
 use tracing::instrument;
@@ -330,6 +330,19 @@ impl KojiActor {
                             KojiRequest::BuildInfo { build_id } => {
                                 let result = bound_client
                                     .call_method1("build_info", (build_id,))
+                                    .inspect_err(|error| {
+                                        let traceback = error
+                                            .traceback(py)
+                                            .and_then(|tb| tb.format().ok())
+                                            .unwrap_or_default();
+                                        tracing::error!(
+                                            build_id,
+                                            cause=?error.cause(py),
+                                            traceback,
+                                            "Koji build_info call failed: {}",
+                                            error.value(py)
+                                        );
+                                    })
                                     .context("Koji build_info call failed")
                                     .and_then(|obj| {
                                         obj.extract::<Build>()
@@ -351,6 +364,19 @@ impl KojiActor {
                                         "add_signature",
                                         (rpm_id, expected_sigkey, signed_package),
                                     )
+                                    .inspect_err(|error| {
+                                        let traceback = error
+                                            .traceback(py)
+                                            .and_then(|tb| tb.format().ok())
+                                            .unwrap_or_default();
+                                        tracing::error!(
+                                            rpm_id,
+                                            cause=?error.cause(py),
+                                            traceback,
+                                            "Koji add_signature call failed: {}",
+                                            error.value(py)
+                                        );
+                                    })
                                     .context("Koji add_signature call failed")
                                     .map(|_| ());
                                 KojiResponse::AddSignature(result)
@@ -358,6 +384,19 @@ impl KojiActor {
                             KojiRequest::WriteSignedRpm { rpm_id, sigkey } => {
                                 let result = bound_client
                                     .call_method1("write_signed_rpm", (rpm_id, sigkey))
+                                    .inspect_err(|error| {
+                                        let traceback = error
+                                            .traceback(py)
+                                            .and_then(|tb| tb.format().ok())
+                                            .unwrap_or_default();
+                                        tracing::error!(
+                                            rpm_id,
+                                            cause=?error.cause(py),
+                                            traceback,
+                                            "Koji write_signed_rpm call failed: {}",
+                                            error.value(py)
+                                        );
+                                    })
                                     .context("Koji write_signed_rpm call failed")
                                     .map(|_| ());
                                 KojiResponse::WriteSignedRpm(result)
@@ -371,8 +410,28 @@ impl KojiActor {
                                 let result = bound_client
                                     .call_method1(
                                         "move_build",
-                                        (build_id, expected_sigkey, tag_from, tag_to),
+                                        (
+                                            build_id,
+                                            expected_sigkey,
+                                            tag_from.clone(),
+                                            tag_to.clone(),
+                                        ),
                                     )
+                                    .inspect_err(|error| {
+                                        let traceback = error
+                                            .traceback(py)
+                                            .and_then(|tb| tb.format().ok())
+                                            .unwrap_or_default();
+                                        tracing::error!(
+                                            build_id,
+                                            tag_from,
+                                            tag_to,
+                                            cause=?error.cause(py),
+                                            traceback,
+                                            "Koji move_build call failed: {}",
+                                            error.value(py),
+                                        );
+                                    })
                                     .context("Koji move_build call failed")
                                     .and_then(|obj| {
                                         obj.extract::<i64>()

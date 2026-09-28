@@ -360,8 +360,8 @@ impl<K: KojiOps> KojiSigner<K> {
             "All RPMs successfully signed; sending build move request to Koji"
         );
         self.koji
-            .move_build(build.build_id, sigkey, tag_from, tag_to)
-            .await?;
+            .move_build(build.build_id, sigkey.clone(), tag_from, tag_to)
+            .await.with_context(||format!("All RPMs in {} were signed by keyid {}, but moving the build to the new tag failed", build.build_id, sigkey))?;
 
         // This won't catch cleanup failures where the drop happens in prior error paths
         let path = temp_dir.path().display().to_string();
@@ -718,7 +718,8 @@ async fn inner_call_rpmsign<K: KojiOps>(
     task_signer
         .koji
         .add_signature(rpm.id, expected_sigkey, path.to_path_buf())
-        .await?;
+        .await
+        .context("Signing succeeded, but adding the signature to Koji failed")?;
 
     let _ = path.close().inspect_err(|error| {
         tracing::error!(?error, "Failed to remove RPM after signing");
