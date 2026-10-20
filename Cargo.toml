@@ -20,9 +20,9 @@ license = "MIT"
 # Opt in to a few additional lints from rustc
 #
 # Refer to `rustc -W help` output for lint groups and individual rules.
-future-incompatible = "warn"
-nonstandard-style = "warn"
-rust-2018-idioms = "warn"
+future_incompatible = "warn"
+nonstandard_style = "warn"
+rust_2018_idioms = "warn"
 
 
 [workspace.lints.clippy]
