@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] - 2026-10-20
+
+### Changed
+
+- Tokens now have a non-zero serial number assigned to them. The serial number
+  derived from the public key of the key pair being exposed. This is a breaking
+  change only if the PKCS11 URI you use included the serial number (#277)
+
+
 ## [2.2.0] - 2026-09-23
 
 ### Added
