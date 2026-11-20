@@ -1,0 +1,207 @@
+interface org.siguldry.Signer
+
+# Indicates how the client has prepared the digest.
+#
+# Some algorithms are not signatures on the hash of the just the message. Some include "context" strings
+# that act as namespaces for signatures, or include some data derived from the signing key, or a salt.
+type DigestType (
+        # A raw digest to be signed.
+        #
+        # This incidates the digest should be used as input to the signing algorithm without any special
+        # treatment. Some algorithms, like ML-DSA, have several forms depending on if the message being
+        # signed has been hashed or not.
+        raw,
+
+        # Dropped this; I'm open to being convinced, but having the caller deal with parsing the
+        # PE and figuring out the correct final digest feels nicer than having the signing server
+        # concern itself with that. 
+        #authenticode,
+
+        # The Mu value from FIPS-204 for ML-DSA signatures.
+        #
+        # This is calculated with SHAKE256(SHAKE256(raw public_key, 64) || 0x00 || context_len (1 byte) || context || message, 64)
+        mldsaMu
+)
+
+# The digest algorithm used on the message.
+type DigestAlgorithm (
+        sha1,
+        sha256,
+        sha384,
+        sha512,
+        sha3_256,
+        sha3_384,
+        sha3_512,
+        # SHAKE256 is a variable-length output function and the signing algorithm, dicated by the
+        # [`KeyAlgorithm`] type, control what size the output should be. As an example, ML-DSA requires
+        # a 64 byte output.
+        shake256
+)
+
+type KeyAlgorithm (
+        rsa2048,
+        rsa3072,
+        rsa4096,
+        p256,
+        ed25519,
+        ed448,
+        mldsa44,
+        mldsa65,
+        mldsa87,
+        unknown
+)
+
+type SignatureAlgorithm (
+        pure,
+        prehashed
+)
+
+type SignatureEncoding (
+        # The raw signature bytes, common for Ed25519, Ed448, P-256, and ML-DSA.
+        raw,
+        # TODO Signed attributes? https://www.rfc-editor.org/rfc/rfc5652.html#section-5.4
+        cmsDetached
+        # Problematic with https://www.rfc-editor.org/rfc/rfc9580.html#section-5.2.4.
+        # The digest type would need a lot for variants, I think.
+        #openPgp
+)
+
+type Certificate (
+        # A human-friendly identifier that is unique to the key this certificate is associated with.
+        # This may be presented to users as, for example, the PKCS#11 Label attribute.
+        id: string,
+        # The encoded certificate. X.509 certificates are PEM-encoded, while OpenPGP certificates are
+        # ASCII-armored.
+        certificate: string
+)
+
+method SignDigest(
+        # The message digest to sign, as a lowercase hex string
+        digest: string,
+        # The type of digest provided, if not specified defaults to raw
+        digestType: ?DigestType,
+        # The hash algorithm used
+        digestAlgorithm: DigestAlgorithm,
+        # Implementation specific signing key id, if not specified server may pick on its own
+        keyId: ?string, 
+        # Requested signature type
+        signatureType: ?SignatureEncoding,
+        # If a PIN is required to sign, the PIN
+        pin: ?string
+) -> (
+        # The signature data in base64
+        signatureData: string,
+        # The format of the signature data, must match the input signature type, if one was specified
+        signatureType: SignatureEncoding,
+        # The ID of the key used for signing, must match the input key ID (normalization is permitted), if one was specified
+        keyId: string
+)
+
+# Sign a complete message rather than a digest of that message.
+#
+# This must be called with the `upgrade` flag, or it will result in an IncompatibleSigningRequest error.
+#
+# After the client received the acknowledgement response, it must send `messageSize` bytes. The server
+# will respond with UTF-8 encoded JSON object followed by a null byte, matching the format and schema of
+# the [`SignDigest`] call, including error cases.
+#
+# After a connection has been used for signing, it will be closed and cannot be reused.
+method SignMessage(
+        # The message length in bytes.
+        #
+        # Negative values are invalid, but 0 is acceptable. The server may choose to reject requests
+        # for messages larger than a certain value.
+        messageSize: int,
+        # The hash algorithm to use.
+        #
+        # If not provided, the message is passed directly to the signing algorithm withou being digested first.
+        # For some algorithms, such as "pure" ed25519 or ML-DSA, the signature defines an internal hashing algorithm.
+        digestAlgorithm: ?DigestAlgorithm,
+        # The format of the signature data, must match the input signature type, if one was specified
+        signatureType: SignatureEncoding,
+        # The ID of the key used for signing, must match the input key ID (normalization is permitted), if one was specified
+        keyId: string,
+        # If a PIN is required to sign, the PIN
+        pin: ?string
+) -> (
+        # The format of the signature data, must match the input signature type, if one was specified
+        #
+        # The signature itself is not included, as the message has not been received yet. It will be in
+        # the response the server sends after the message is uploaded.
+        signatureType: SignatureEncoding,
+        # The ID of the key used for signing, must match the input key ID (normalization is permitted), if one was specified
+        keyId: string
+)
+
+# Encodes all supported combinations of signatures parameters
+type SupportedSignatureParameter(
+        digestType: []DigestType,
+        digestAlgorithm: []DigestAlgorithm,
+        signatureEncoding: []SignatureEncoding
+)
+
+
+type Key (
+        # A human-friendly unique identifier for the signing key.
+        # This may be exposed to users as, for example, the PKCS#11 Label attribute, or used in configuration
+        # files to select this signing key.
+        keyId: string,
+        # If this key is related to another signing key as part of a hybrid signing algorithm,
+        # this is the hybrid pair's keyId.
+        hybridId: ?string,
+        # The key algorithm, which impacts the set of supported signing operations
+        algorithm: KeyAlgorithm,
+        # Signing parameter this key is good for
+        supportedSignaturesParameters: []SupportedSignatureParameter,
+        # The PEM-encoded public key.
+        publicKey: string,
+        # A list of zero or more PEM-encoded X.509 certificates associated with this key.
+        x509Certificate: []Certificate,
+        # A list of zero or more ASCII-armored OpenPGP certificates certificates associated with this key.
+        openPgpCertificate: []Certificate,
+        # Whether signing with this key requires specification of a PIN. If unspecified, this information is not known, and the only way to figure it out is to try signing, and deal with PinRequired() error
+        requiresPin: ?bool
+)
+
+# Call with 'more' flag to enumerate keys in batches.
+# Returns an empty list when no keys are available.
+method ListKeys(
+        # If specified, get information about a specific key
+        keyId: ?string
+) -> (
+        keys: []Key
+)
+
+# The PIN is required, but was not provided.
+error PinRequired()
+
+# The PIN is required and was provided, but is not valid.
+error PinInvalid()
+
+# The digest type provided is not supported with the key algorithm of the referenced keyId.
+#
+# For example, pure ML-DSA with a raw digest is not supported.
+error DigestTypeNotSupported()
+
+# The provided digest is not hex-encoded, or is not the expected length.
+error DigestInvalid()
+
+# The digest algorithm used is not supported with the key algorithm of the referenced keyId.
+error DigestAlgorithmNotSupported()
+
+# The signature type is not supported; it may be the service has not implemented that combination.
+error SignatureEncodingNotSupported()
+
+error IncompatibleSigningRequest()
+
+# No key is available on the server by the provided keyId
+error NoSuchKey()
+
+# The message size is larger than the server will accept.
+error MessageTooLarge()
+
+# The client ended the upload before sending the declared number of message bytes.
+error MessageIncomplete()
+
+# The server failed to generate the requested signature.
+error SigningFailed()
