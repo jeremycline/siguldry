@@ -16,6 +16,11 @@ repository = "https://github.com/jeremycline/siguldry"
 [lints]
 workspace = true
 
+[features]
+# If disabled, the only method available is to shell out to a program to sign.
+default = ["sigul-client"]
+sigul-client = ["dep:siguldry"]
+
 [dependencies.anyhow]
 workspace = true
 
@@ -36,6 +41,7 @@ features = ["net"]
 
 [dependencies.siguldry]
 workspace = true
+optional = true
 features = ["sigul-client"]
 
 # Used to temporarily stash input files for sigul within the runtime directory.

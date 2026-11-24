@@ -12,8 +12,9 @@
 
 use std::{
     fs::File,
-    io,
+    io::{self, Read},
     os::{fd::AsFd, linux::fs::MetadataExt, unix::fs::PermissionsExt},
+    process::Stdio,
     time::Duration,
 };
 
@@ -28,8 +29,6 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{Instrument, instrument};
 
 use crate::pesign::{self, Command, Header, Response, SignAttachedRequest};
-
-const SELF_SIGNING_CERTIFICATE_NICKNAME: &str = "Secure Boot Self Signing Key";
 
 /// Listen on a Unix socket on the given path.
 ///
@@ -372,254 +371,6 @@ async fn get_files_from_conn(connection: UnixStream) -> anyhow::Result<(UnixStre
     Ok((connection, pesign_files))
 }
 
-/// Log in to Azure as the pod's workload-identity user-assigned managed
-/// identity (federated token, no secret) ahead of an `az xsign` call.
-///
-/// AKS's workload-identity webhook injects `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
-/// and `AZURE_FEDERATED_TOKEN_FILE` into the pod environment; those are used
-/// to obtain a token via `az login --service-principal --federated-token`.
-///
-/// The caller supplies a per-request Azure CLI configuration directory. Both
-/// this login command and its subsequent `az xsign` invocation must use it so
-/// concurrent requests have isolated MSAL token caches.
-async fn az_login_workload_identity(
-    azure_config_dir: &std::path::Path,
-) -> anyhow::Result<()> {
-    tracing::debug!("Acquiring Azure workload-identity token for 'az login'");
-    let client_id = std::env::var("AZURE_CLIENT_ID")
-        .context("AZURE_CLIENT_ID is not set; is workload identity configured?")?;
-    let tenant_id = std::env::var("AZURE_TENANT_ID")
-        .context("AZURE_TENANT_ID is not set; is workload identity configured?")?;
-    let token_file = std::env::var("AZURE_FEDERATED_TOKEN_FILE")
-        .context("AZURE_FEDERATED_TOKEN_FILE is not set; is workload identity configured?")?;
-    tracing::debug!(client_id, tenant_id, token_file, "Running 'az login'");
-
-    let federated_token = tokio::fs::read_to_string(&token_file)
-        .await
-        .with_context(|| format!("failed to read Azure federated token file '{token_file}'"))?;
-    let federated_token = federated_token.trim();
-    if federated_token.is_empty() {
-        return Err(anyhow!(
-            "Azure federated token file '{token_file}' is empty"
-        ));
-    }
-
-    let mut command = tokio::process::Command::new("az");
-    command
-        .arg("login")
-        .arg("--service-principal")
-        .arg("-u")
-        .arg(&client_id)
-        .arg("--tenant")
-        .arg(&tenant_id)
-        .arg("--allow-no-subscriptions")
-        .arg("--federated-token")
-        .arg(federated_token)
-        .env("AZURE_CONFIG_DIR", azure_config_dir)
-        .kill_on_drop(true);
-    let output = command
-        .output()
-        .await
-        .context("Failed to execute 'az login' (is the Azure CLI installed?)")?;
-    tracing::debug!(
-        exit_code = ?output.status.code(),
-        stdout = %String::from_utf8_lossy(&output.stdout),
-        "'az login' completed"
-    );
-    if !output.status.success() {
-        tracing::error!(
-            exit_code = ?output.status.code(),
-            stderr = %String::from_utf8_lossy(&output.stderr),
-            "'az login' failed"
-        );
-        return Err(anyhow!("'az login' exited unsuccessfully: {}", output.status));
-    }
-    tracing::debug!(client_id, tenant_id, "az login OK (workload identity)");
-
-    Ok(())
-}
-
-async fn get_xsign_config(
-    xsign_config_dir: &std::path::Path,
-    certificate_name: &str,
-    signer_to_key_code: &std::collections::HashMap<String, String>,
-) -> anyhow::Result<std::path::PathBuf> {
-    let signer_name = certificate_name.replace('-', "_");
-    let key_code = signer_to_key_code
-        .get(&signer_name)
-        .or_else(|| signer_to_key_code.get("default_signer"))
-        .ok_or_else(|| anyhow!("xsign signer mapping does not contain a default_signer entry"))?;
-    Ok(xsign_config_dir.join(format!("{key_code}.json")))
-}
-
-/// Sign a PE binary using Azure's xsign service.
-#[instrument(skip_all, ret)]
-async fn sign_with_xsign(
-    input_path: &std::path::Path,
-    output_path: &std::path::Path,
-    token_name: &str,
-    certificate_name: &str,
-    xsign_config_dir: &std::path::Path,
-    signer_to_key_code: &std::collections::HashMap<String, String>,
-    azure_config_dir: &std::path::Path,
-) -> anyhow::Result<()> {
-    let requested_xsign_config_path =
-        get_xsign_config(xsign_config_dir, certificate_name, signer_to_key_code).await?;
-    let xsign_config_path = requested_xsign_config_path.canonicalize().with_context(|| {
-        format!(
-            "failed to resolve xsign configuration file '{}'",
-            requested_xsign_config_path.display()
-        )
-    })?;
-    let resolved_xsign_config_dir = xsign_config_dir.canonicalize().with_context(|| {
-        format!(
-            "failed to resolve xsign configuration directory '{}'",
-            xsign_config_dir.display()
-        )
-    })?;
-    if !xsign_config_path.starts_with(&resolved_xsign_config_dir) {
-        let message = format!(
-            "xsign configuration file '{}' resolves outside configured directory '{}'",
-            requested_xsign_config_path.display(),
-            xsign_config_dir.display()
-        );
-        tracing::error!(
-            certificate_name = %certificate_name,
-            config = ?xsign_config_path,
-            "{message}"
-        );
-        return Err(anyhow!(message));
-    }
-    if !xsign_config_path.is_file() {
-        let message = format!("xsign configuration path '{}' is not a file", xsign_config_path.display());
-        tracing::error!(
-            certificate_name = %certificate_name,
-            config = ?xsign_config_path,
-            "{message}"
-        );
-        return Err(anyhow!(message));
-    }
-
-    tracing::debug!(
-        token_name = %token_name,
-        certificate_name = %certificate_name,
-        input = ?input_path,
-        output = ?output_path,
-        "Starting xsign signing attempt"
-    );
-    // `az xsign sign-file` signs its `--file-name` input in place,
-    // so sign a copy of the input placed at the output path.
-    tokio::fs::copy(&input_path, &output_path)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to copy '{}' to '{}' for xsign",
-                input_path.display(),
-                output_path.display()
-            )
-        })?;
-    tracing::debug!(output = ?output_path, "Copied unsigned file to output path for in-place signing");
-
-    tracing::debug!(config = ?xsign_config_path, "xsign configuration file found");
-
-    az_login_workload_identity(azure_config_dir).await?;
-
-    let mut command = tokio::process::Command::new("az");
-    command
-        .arg("xsign")
-        .arg("sign-file")
-        .arg("--config-file")
-        .arg(xsign_config_path)
-        .arg("--file-name")
-        .arg(&output_path)
-        .env("AZURE_CONFIG_DIR", azure_config_dir)
-        .kill_on_drop(true);
-    tracing::debug!(?command, "Running 'az xsign sign-file'");
-    let output = command
-        .output()
-        .await
-        .context("Failed to execute 'az xsign' (is it installed?)")?;
-    tracing::debug!(
-        exit_code = ?output.status.code(),
-        stdout = %String::from_utf8_lossy(&output.stdout),
-        stderr = %String::from_utf8_lossy(&output.stderr),
-        "'az xsign sign-file' completed"
-    );
-    if !output.status.success() {
-        tracing::error!(
-            exit_code = ?output.status.code(),
-            stderr = %String::from_utf8_lossy(&output.stderr),
-            stdout = %String::from_utf8_lossy(&output.stdout),
-            "'az xsign sign-file' failed"
-        );
-        return Err(anyhow!(
-            "'az xsign sign-file' exited unsuccessfully: {}",
-            output.status
-        ));
-    }
-    tracing::debug!("xsign signing attempt succeeded");
-
-    Ok(())
-}
-
-/// Sign a PE binary using the local self-signing certificate.
-#[instrument(skip_all, ret)]
-async fn sign_with_self_signed_cert(
-    input_path: &std::path::Path,
-    output_path: &std::path::Path,
-    token_name: &str,
-    certificate_name: &str,
-    self_sign_nssdb_dir: &std::path::Path,
-) -> anyhow::Result<()> {
-    tracing::info!(
-        token_name = %token_name,
-        certificate_name = %certificate_name,
-        output = ?output_path,
-        "Self-signing requested; signing binary with local certificate"
-    );
-
-    // Use pesign with an NSS DB token and certificate nickname.
-    let mut command = tokio::process::Command::new("pesign");
-    command
-        .arg("-n")
-        .arg(format!("sql:{}", self_sign_nssdb_dir.display()))
-        .arg("-c")
-        .arg(SELF_SIGNING_CERTIFICATE_NICKNAME)
-        .arg("-i")
-        .arg(input_path)
-        .arg("-o")
-        .arg(output_path)
-        .arg("-s")
-        .kill_on_drop(true);
-
-    tracing::debug!(?command, "Running 'pesign' for self-signing");
-    let output = command
-        .output()
-        .await
-        .context("Failed to execute 'pesign' (is it installed?)")?;
-    tracing::debug!(
-        exit_code = ?output.status.code(),
-        stdout = %String::from_utf8_lossy(&output.stdout),
-        stderr = %String::from_utf8_lossy(&output.stderr),
-        "'pesign' self-signing completed"
-    );
-    if !output.status.success() {
-        tracing::error!(
-            exit_code = ?output.status.code(),
-            stderr = %String::from_utf8_lossy(&output.stderr),
-            stdout = %String::from_utf8_lossy(&output.stdout),
-            "'pesign' self-signing failed"
-        );
-        return Err(anyhow!(
-            "'pesign' self-signing exited unsuccessfully: {}",
-            output.status
-        ));
-    }
-    tracing::info!("Self-signing with pesign completed successfully");
-
-    Ok(())
-}
-
 /// Handle signing requests from the pesign-client.
 ///
 /// # Example
@@ -641,11 +392,6 @@ async fn sign_attached_with_filetype(
 ) -> Result<(), anyhow::Error> {
     let key = request.key(&context.config.keys)?;
     tracing::debug!(?key, "signing request mapped to a known key");
-    // When true (and self-signing is disabled), signing is performed by the
-    // local 'az xsign' tool instead of being forwarded to the remote sigul server.
-    let xsign_enabled = context.config.xsign_enabled;
-    // When true, signing is performed locally with pesign.
-    let self_sign_enabled = context.config.self_sign_enabled;
     let temp_dir_root = std::env::temp_dir();
     let temp_dir = tempfile::Builder::new()
         .prefix(".work")
@@ -668,9 +414,7 @@ async fn sign_attached_with_filetype(
                 ),
             };
         })?;
-    let sigul_input = temp_dir.path().join("unsigned_file");
-    let sigul_output = temp_dir.path().join("signed_file");
-    let azure_config_dir = temp_dir.path().join("azure-config");
+    let signed_output = temp_dir.path().join("signed_file");
     tokio::fs::create_dir(&azure_config_dir)
         .await
         .with_context(|| {
@@ -683,81 +427,123 @@ async fn sign_attached_with_filetype(
     let span = tracing::Span::current();
     let sigul_input = tokio::task::spawn_blocking(move || {
         let _enter = span.enter();
-        let mut sigul_input_file = std::fs::File::options().create(true).write(true).truncate(true).open(&sigul_input).inspect_err(|error| {
-            tracing::error!(?error, path=?sigul_input, "Failed to open the temporary file used for sigul input");
-        })?;
-        let input_bytes = std::io::copy(&mut pesign_files.unsigned_input, &mut sigul_input_file).inspect_err(|error| {
-            tracing::error!(?error, path=?sigul_input, "Failed to copy the input file to a temporary file for signing");
-        })?;
-        if self_sign_enabled {
-            tracing::info!(
-                input_bytes,
-                "Signing PE file with local self-signing certificate"
-            );
-        } else if xsign_enabled {
-            tracing::info!(input_bytes, "Signing PE file with 'az xsign sign-file'");
-        } else {
-            tracing::info!(input_bytes, "Forwarding PE file to Sigul for signing");
-        }
+        let mut buf = Vec::with_capacity(pesign_files.unsigned_input.metadata()?.len().try_into()?);
+        let input_bytes = pesign_files
+            .unsigned_input
+            .read_to_end(&mut buf)
+            .inspect_err(|error| {
+                tracing::error!(
+                    ?error,
+                    "Failed to read the input file from the passed filed descriptor for signing"
+                );
+            })?;
+        tracing::info!(
+            input_bytes,
+            "Received PE file from pesign-client for signing"
+        );
 
-        Ok::<_, anyhow::Error>(sigul_input)
-    }).await??;
+        Ok::<_, anyhow::Error>(buf)
+    })
+    .await??;
 
     loop {
         let request = tokio::time::timeout(
             Duration::from_secs(context.config.sigul_request_timeout_secs.get()),
             async {
-                if self_sign_enabled {
-                    sign_with_self_signed_cert(
-                        &sigul_input,
-                        &sigul_output,
-                        &request.token_name,
-                        &request.certificate_name,
-                        &context.config.self_sign_nssdb_dir,
-                    )
-                    .await
-                } else if xsign_enabled {
-                    sign_with_xsign(
-                        &sigul_input,
-                        &sigul_output,
-                        &request.token_name,
-                        &request.certificate_name,
-                        &context.config.xsign_config_dir,
-                        &context.config.azl_signer_to_esrp_keycode,
-                        &azure_config_dir,
-                    )
-                    .await
-                } else {
-                    let input_stream =
-                        tokio::fs::File::open(&sigul_input).await.with_context(|| {
-                            format!("failed to read input file '{}'", sigul_input.display())
-                        })?;
-                    let output_stream = tokio::fs::OpenOptions::new()
+                if let Some(sign_command) = context.config.sign_command.as_ref() {
+                    // Each invocation of the command should have a clean slate
+                    let command_dir = tempfile::Builder::new().tempdir_in(temp_dir.path())?;
+                    let command_unsigned_input = command_dir.path().join("unsigned_file");
+                    let command_signed_output = command_dir.path().join("signed_file");
+                    let mut unsigned_file = tokio::fs::OpenOptions::new()
                         .write(true)
                         .truncate(true)
                         .create(true)
-                        .open(&sigul_output)
+                        .open(&command_unsigned_input)
                         .await
                         .with_context(|| {
-                            format!("failed to open output file '{}'", sigul_output.display())
+                            format!("failed to open temporary file '{}'", signed_output.display())
                         })?;
+                    unsigned_file.write_all(&sigul_input).await.context("Failed to write unsigned input to temporary file")?;
+                    unsigned_file.flush().await?;
+                    drop(unsigned_file);
 
-                    context
-                        .sigul_client
-                        .as_ref()
-                        .ok_or_else(|| {
-                            anyhow!("Sigul client is not configured (local signing is enabled)")
-                        })?
-                        .sign_pe(
-                            input_stream,
-                            output_stream,
-                            key.passphrase_path.as_path().try_into()?,
-                            key.key_name.clone(),
-                            key.certificate_name.clone(),
-                        )
-                        .await?;
+                    let mut command = tokio::process::Command::new(&sign_command.command);
+                    command
+                        .kill_on_drop(true)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .current_dir(command_dir.path())
+                        .env("PESIGN_TOKEN_NAME", &key.pesign_token_name)
+                        .env("PESIGN_CERTIFICATE_NAME", &key.pesign_certificate_name)
+                        .env("KEY_NAME", &key.key_name)
+                        .env("CERTIFICATE_NAME", &key.certificate_name)
+                        .env("PASSPHRASE_PATH", &key.passphrase_path)
+                        .args(&sign_command.arguments);
 
-                    Ok(())
+                    let output = command.output().await.with_context(|| {
+                        format!("Failed to spawn command {:?}", sign_command.command)
+                    })?;
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    stderr
+                        .lines()
+                        .map(|l| tracing::warn!("Sign command stderr: {l}"))
+                        .for_each(drop);
+                    if output.status.success() {
+                        if !command_signed_output.is_file() {
+                            Err(anyhow!("Sign command indicated success, but did not not produce a signed file"))
+                        } else {
+                            tokio::fs::rename(command_signed_output, &signed_output).await.context("Failed to move signed output")?;
+                            Ok(())
+                        }
+                    } else {
+                        let exit_code = output.status.code();
+                        tracing::warn!(
+                            %key.pesign_token_name,
+                            %key.pesign_certificate_name,
+                            %key.key_name,
+                            %key.certificate_name,
+                            ?exit_code,
+                            "Sign command failed"
+                        );
+                        Err(anyhow!("Sign command failed with exit code {exit_code:?}"))
+                    }
+                } else {
+                    #[cfg(feature = "sigul-client")]
+                    {
+                        use std::io::Cursor;
+
+                        let input_stream = Cursor::new(sigul_input.as_slice());
+                        let output_stream = tokio::fs::OpenOptions::new()
+                            .write(true)
+                            .truncate(true)
+                            .create(true)
+                            .open(&signed_output)
+                            .await
+                            .with_context(|| {
+                                format!("failed to open output file '{}'", signed_output.display())
+                            })?;
+
+                        context
+                            .sigul_client
+                            .sign_pe(
+                                input_stream,
+                                output_stream,
+                                key.passphrase_path.as_path().try_into()?,
+                                key.key_name.clone(),
+                                key.certificate_name.clone(),
+                            )
+                            .await?;
+
+                        Ok(())
+                    }
+                    #[cfg(not(feature = "sigul-client"))]
+                    {
+                        Err(anyhow!(
+                            "Sigul signing requires building with the 'sigul-client' feature"
+                        ))
+                    }
                 }
             },
         )
@@ -783,7 +569,7 @@ async fn sign_attached_with_filetype(
         command
             .arg("--cert")
             .arg(signing_cert)
-            .arg(&sigul_output)
+            .arg(&signed_output)
             .kill_on_drop(true);
         let result = tokio::time::timeout(Duration::from_secs(5), command.output()).await;
         match result {
@@ -813,11 +599,11 @@ async fn sign_attached_with_filetype(
     let span = tracing::Span::current();
     tokio::task::spawn_blocking(move || {
         let _enter = span.enter();
-        let mut sigul_output_file = std::fs::File::options().create(false).read(true).open(&sigul_output).inspect_err(|error| {
-            tracing::error!(?error, path=?sigul_output, "Failed to open the temporary file used for sigul output");
+        let mut sigul_output_file = std::fs::File::options().create(false).read(true).open(&signed_output).inspect_err(|error| {
+            tracing::error!(?error, path=?signed_output, "Failed to open the signed output file");
         })?;
         let output_bytes = std::io::copy(&mut sigul_output_file, &mut pesign_files.signed_output).inspect_err(|error| {
-            tracing::error!(?error, path=?sigul_input, "Failed to copy the sigul output file to the pesign input");
+            tracing::error!(?error, path=?sigul_input, "Failed to copy the signed output file to the pesign input");
         })?;
         tracing::info!(output_bytes, "Signing request completed");
         Ok::<_, anyhow::Error>(())

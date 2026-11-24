@@ -14,7 +14,7 @@
 //!
 //! To validate your configuration, refer to the `sigul-pesign-bridge config` command.
 
-use std::{collections::HashMap, num::NonZeroU64, path::PathBuf};
+use std::{num::NonZeroU64, path::PathBuf};
 
 use anyhow::{Context, anyhow};
 use serde::{Deserialize, Serialize};
@@ -37,37 +37,14 @@ pub struct Config {
     pub sigul_request_timeout_secs: NonZeroU64,
 
     /// Configuration to connect to the Sigul server.
+    #[cfg(feature = "sigul-client")]
     pub sigul: Siguldry,
 
-    /// Submit files for signing using `az xsign sign-file` instead of forwarding the request
-    /// to the Sigul server.
-    #[serde(default)]
-    pub xsign_enabled: bool,
-
-    /// Directory containing ESRP xsign configuration files. For a request with
-    /// signer name, the service uses the corresponding ESRP key code from
-    /// `azl_signer_to_esrp_keycode` to select
-    /// `<xsign_config_dir>/<ESRP key code>.json`.
+    /// Sign the PE with an external command, rather than the Sigul client.
     ///
-    /// This path is only used when `xsign_enabled` is true.
-    #[serde(default = "default_xsign_config_dir")]
-    pub xsign_config_dir: PathBuf,
-
-    /// Mapping from signer names to ESRP xsign key codes.
+    /// If this section is set, the application will be passed to an external command for signing.
     #[serde(default)]
-    pub azl_signer_to_esrp_keycode: HashMap<String, String>,
-
-    /// Sign files locally with `pesign` and the configured NSS DB instead of forwarding
-    /// the request to the Sigul server.
-    ///
-    /// `xsign_enabled` takes precedence when both options are enabled.
-    #[serde(default)]
-    pub self_sign_enabled: bool,
-
-    /// Directory containing the NSS DB used by `pesign` for local
-    /// self-signing.
-    #[serde(default = "default_self_sign_nssdb_dir")]
-    pub self_sign_nssdb_dir: PathBuf,
+    pub sign_command: Option<SignCommand>,
 
     /// A list of signing keys available for use.
     ///
@@ -88,6 +65,50 @@ pub struct Config {
     /// An example entry would be `user:kojibuilder:rwx`.
     #[serde(default)]
     pub socket_acl: Vec<String>,
+}
+
+/// Rather than using Sigul as the signing backend, run this command to produce a signature.
+///
+/// # Command Interface
+///
+/// The command interface is not particularly flexible, so it is likely you will want to use
+/// a shell script to wrap your actually signing tool.
+///
+/// The command's current working directory contains a single file, "unsigned_file" which it must
+/// sign. It's acceptable for the command to modify "unsigned_file" if necessary (e.g. sign
+/// in-place).
+///
+/// The command must create a file called "signed_file" which contains the signed version of
+/// "unsigned_file".
+///
+/// The command is free to create any additional files within its working directory that it needs
+/// and it does not need to perform any clean-up itself.
+///
+/// ## Environment Variables
+///
+/// Environment variables set for the service process are passed through to the command. Additionally,
+/// the following environment variables are set, which map to the values of the [`Key`] configuration:
+///
+/// - `PESIGN_TOKEN_NAME`: the token name passed from the pesign-client to the service
+/// - `PESIGN_CERTIFICATE_NAME`: the certificate name passed from the pesign-client to the service
+/// - `KEY_NAME`: The name of the key in your signing service
+/// - `CERTIFICATE_NAME`: The name of the certificate in your signing service
+/// - `PASSPHRASE_PATH`: Path to a systemd credential you may use to store the secret needed to access
+///   the signing key. Depending on your tooling, this may not be necessary and can be set to anything
+///   in the [`Key`]'s configuration.
+///
+/// Environment variables are passed through from the service process. The stderr of the command is
+/// logged at WARN level, as is a non-zero exit code. The command must exit 0 to be considered
+/// successful.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignCommand {
+    /// The command to run.
+    ///
+    pub command: PathBuf,
+
+    /// The arguments to pass to the command.
+    pub arguments: Vec<String>,
 }
 
 /// Configuration to connect to the Sigul server.
@@ -227,11 +248,6 @@ impl Config {
     /// If the referenced files don't exist, an error is returned.
     #[doc(hidden)]
     pub fn fix_credentials(&mut self, credentials_dir: &std::path::Path) -> anyhow::Result<()> {
-        if self.xsign_enabled || self.self_sign_enabled {
-            // Signing does not use Sigul so the Sigul connection settings are unused.
-            return Ok(());
-        }
-
         self
             .keys
             .iter_mut()
@@ -266,36 +282,40 @@ impl Config {
                 Ok(())
             }).collect::<Result<Vec<_>, _>>()?;
 
-        if self.sigul.private_key.is_absolute() {
-            tracing::warn!(
-                private_key = self.sigul.private_key.display().to_string(),
-                "Path to private key file is absolute; consider using systemd credentials"
-            );
-        } else {
-            self.sigul.private_key = credentials_dir.join(&self.sigul.private_key);
-            if !self.sigul.private_key.exists() {
-                return Err(anyhow::anyhow!(
-                    "No private key file named '{}' found in credentials directory",
-                    self.sigul.private_key.display()
-                ));
+        #[cfg(feature = "sigul-client")]
+        {
+            if self.sigul.private_key.is_absolute() {
+                tracing::warn!(
+                    private_key = self.sigul.private_key.display().to_string(),
+                    "Path to private key file is absolute; consider using systemd credentials"
+                );
+            } else {
+                self.sigul.private_key = credentials_dir.join(&self.sigul.private_key);
+                if !self.sigul.private_key.exists() {
+                    return Err(anyhow::anyhow!(
+                        "No private key file named '{}' found in credentials directory",
+                        self.sigul.private_key.display()
+                    ));
+                }
             }
-        }
-        if !self.sigul.client_certificate.is_absolute() {
-            self.sigul.client_certificate = credentials_dir.join(&self.sigul.client_certificate);
-            if !self.sigul.client_certificate.exists() {
-                return Err(anyhow::anyhow!(
-                    "No client certificate file named '{}' found in credentials directory",
-                    self.sigul.client_certificate.display()
-                ));
+            if !self.sigul.client_certificate.is_absolute() {
+                self.sigul.client_certificate =
+                    credentials_dir.join(&self.sigul.client_certificate);
+                if !self.sigul.client_certificate.exists() {
+                    return Err(anyhow::anyhow!(
+                        "No client certificate file named '{}' found in credentials directory",
+                        self.sigul.client_certificate.display()
+                    ));
+                }
             }
-        }
-        if !self.sigul.ca_certificate.is_absolute() {
-            self.sigul.ca_certificate = credentials_dir.join(&self.sigul.ca_certificate);
-            if !self.sigul.ca_certificate.exists() {
-                return Err(anyhow::anyhow!(
-                    "No CA certificate file named '{}' found in credentials directory",
-                    self.sigul.ca_certificate.display()
-                ));
+            if !self.sigul.ca_certificate.is_absolute() {
+                self.sigul.ca_certificate = credentials_dir.join(&self.sigul.ca_certificate);
+                if !self.sigul.ca_certificate.exists() {
+                    return Err(anyhow::anyhow!(
+                        "No CA certificate file named '{}' found in credentials directory",
+                        self.sigul.ca_certificate.display()
+                    ));
+                }
             }
         }
 
@@ -308,16 +328,6 @@ impl Config {
     /// values.
     #[doc(hidden)]
     pub fn validate(&self) -> anyhow::Result<()> {
-        if !self.xsign_enabled && !self.self_sign_enabled {
-            self.keys
-                .iter()
-                .map(|key| {
-                    key.passphrase()
-                        .inspect_err(|e| tracing::error!(path=?key.passphrase_path, error=%e))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-        }
-
         self.keys
             .iter()
             .filter_map(|key| key.certificate_file.as_ref())
@@ -366,23 +376,12 @@ impl Default for Config {
                 .expect("Don't set the default to 0"),
             sigul_request_timeout_secs: NonZeroU64::new(60).expect("Don't set the default to 0"),
             keys: vec![Key::default()],
+            #[cfg(feature = "sigul-client")]
             sigul: Siguldry::default(),
-            xsign_enabled: false,
-            xsign_config_dir: default_xsign_config_dir(),
-            azl_signer_to_esrp_keycode: HashMap::new(),
-            self_sign_enabled: false,
-            self_sign_nssdb_dir: default_self_sign_nssdb_dir(),
+            sign_command: None,
             socket_acl: vec![],
         }
     }
-}
-
-fn default_xsign_config_dir() -> PathBuf {
-    PathBuf::from("/etc/xsign")
-}
-
-fn default_self_sign_nssdb_dir() -> PathBuf {
-    PathBuf::from("/etc/sigul-pesign-bridge/self-sign/nssdb")
 }
 
 pub(crate) fn load(path: &str) -> anyhow::Result<Config> {

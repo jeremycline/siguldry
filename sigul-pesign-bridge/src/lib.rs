@@ -11,6 +11,7 @@ mod service;
 
 use std::path::PathBuf;
 
+#[cfg(feature = "sigul-client")]
 use anyhow::Context as AnyhowContext;
 #[doc(hidden)]
 pub use service::listen;
@@ -22,11 +23,8 @@ pub struct Context {
     pub(crate) runtime_directory: PathBuf,
     pub(crate) config: config::Config,
     /// The Sigul client, used to forward signing requests to a Sigul server.
-    ///
-    /// This is `None` when `config.xsign_enabled` or `config.self_sign_enabled`
-    /// is set, since signing is done locally and the Sigul TLS credentials are
-    /// not required to exist.
-    pub(crate) sigul_client: Option<siguldry::v1::client::Client>,
+    #[cfg(feature = "sigul-client")]
+    pub(crate) sigul_client: siguldry::v1::client::Client,
 }
 
 impl Context {
@@ -44,9 +42,8 @@ impl Context {
             ));
         }
 
-        let sigul_client = if config.xsign_enabled || config.self_sign_enabled {
-            None
-        } else {
+        #[cfg(feature = "sigul-client")]
+        let sigul_client = {
             let tls_config = siguldry::v1::client::TlsConfig::new(
                 &config.sigul.client_certificate,
                 &config.sigul.private_key,
@@ -54,18 +51,19 @@ impl Context {
                 &config.sigul.ca_certificate,
             )
             .context("Failed to create OpenSSL TLS configuration")?;
-            Some(siguldry::v1::client::Client::new(
+            siguldry::v1::client::Client::new(
                 tls_config,
                 config.sigul.bridge_hostname.clone(),
                 config.sigul.bridge_port,
                 config.sigul.server_hostname.clone(),
                 config.sigul.sigul_user_name.clone(),
-            ))
+            )
         };
 
         Ok(Self {
             runtime_directory,
             config,
+            #[cfg(feature = "sigul-client")]
             sigul_client,
         })
     }
